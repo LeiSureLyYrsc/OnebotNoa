@@ -207,9 +207,9 @@ docker pull ghcr.io/leisurelyyrsc/onebotnoa:latest
 - [x] I1 SQLite + 迁移 + 管理登录（pbkdf2 / 会话 / CSRF / 审计）
 - [x] I2 上游监听：多实例单端点、五级身份识别、账号状态机、串号检测、待接入队列
 - [x] I3 下游监听 + 动作路由：两种视图、目标解析、echo 重写、超时、流式动作、事件多播
-- [ ] I4 管理 REST（账号/Bot/绑定/监听）+ SSE + WebUI 页面
-- [ ] I5 账号级令牌桶、Bot 配额、策略黑白名单、背压、/metrics
-- [ ] I6 双向拨号（上游/下游）+ 退避重连 + 探活
+- [x] I4 管理 REST（账号/Bot/绑定/监听）+ SSE 实时事件流 + WebUI 页面
+- [x] I5 账号级令牌桶、Bot 配额、策略黑白名单、背压、离线队列、/metrics
+- [x] I6 双向拨号（上游/下游）+ 指数退避重连 + 探活 + 拨号目标页
 - [ ] I7 元事件合成、本地应答、仪表盘、API 调试台
 - [ ] I8 HTTP 兼容层（HTTP API + 上报）
 - [ ] I9 动态监听端口/路径、TLS、部署产物

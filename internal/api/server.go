@@ -36,6 +36,7 @@ type Options struct {
 	Events    *hub.EventLog
 	Metrics   *hub.Metrics
 	Policy    *hub.PolicyEngine
+	Dialer    Dialer
 	Version   string
 	StartedAt time.Time
 }
@@ -99,6 +100,13 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/listeners", s.requireAuth(s.handleCreateListener))
 	mux.HandleFunc("PATCH /api/v1/listeners/{id}", s.requireAuth(s.handleUpdateListener))
 	mux.HandleFunc("DELETE /api/v1/listeners/{id}", s.requireAuth(s.handleDeleteListener))
+
+	// Dialed (outbound) connections
+	mux.HandleFunc("GET /api/v1/endpoints", s.requireAuth(s.handleListEndpoints))
+	mux.HandleFunc("POST /api/v1/endpoints", s.requireAuth(s.handleCreateEndpoint))
+	mux.HandleFunc("PATCH /api/v1/endpoints/{id}", s.requireAuth(s.handleUpdateEndpoint))
+	mux.HandleFunc("DELETE /api/v1/endpoints/{id}", s.requireAuth(s.handleDeleteEndpoint))
+	mux.HandleFunc("POST /api/v1/endpoints/{name}/reconnect", s.requireAuth(s.handleReconnectEndpoint))
 
 	// Live activity
 	mux.HandleFunc("GET /api/v1/events/recent", s.requireAuth(s.handleRecentEvents))

@@ -400,6 +400,86 @@ func TestListenerCRUDValidation(t *testing.T) {
 	}
 }
 
+func TestEndpointCRUDAndValidation(t *testing.T) {
+	a := newTestAPI(t)
+	csrf := loginAdmin(t, a)
+
+	// Validation catches the common mistakes before anything is stored.
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"bad kind", `{"name":"x","kind":"sideways","url":"ws://h:1/"}`, http.StatusBadRequest},
+		{"bad scheme", `{"name":"x","kind":"upstream_dial","url":"http://h:1/"}`, http.StatusBadRequest},
+		{"bad mode", `{"name":"x","kind":"upstream_dial","url":"ws://h:1/","mode":"triple"}`, http.StatusBadRequest},
+		{"no name", `{"kind":"upstream_dial","url":"ws://h:1/"}`, http.StatusBadRequest},
+		{"downstream without bot", `{"name":"x","kind":"downstream_dial","url":"ws://h:1/"}`, http.StatusBadRequest},
+		{"upstream with bot", `{"name":"x","kind":"upstream_dial","url":"ws://h:1/","bot_id":1}`, http.StatusBadRequest},
+		{"bad reconnect", `{"name":"x","kind":"upstream_dial","url":"ws://h:1/","reconnect":{"min":"soon"}}`, http.StatusBadRequest},
+		{"bad jitter", `{"name":"x","kind":"upstream_dial","url":"ws://h:1/","reconnect":{"jitter":2}}`, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		res, _ := a.write(t, http.MethodPost, "/api/v1/endpoints", tc.body, csrf)
+		if res.StatusCode != tc.want {
+			t.Fatalf("%s = %d, want %d", tc.name, res.StatusCode, tc.want)
+		}
+	}
+
+	res, payload := a.write(t, http.MethodPost, "/api/v1/endpoints",
+		`{"name":"qq-10001","kind":"upstream_dial","url":"ws://127.0.0.1:6700/","account_hint":"10001","token":"sec","reconnect":{"min":"2s","max":"30s","jitter":0.2}}`, csrf)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create endpoint = %d (%v)", res.StatusCode, payload)
+	}
+	stored, err := a.st.EndpointByName(context.Background(), "qq-10001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Token != "sec" || !strings.Contains(string(stored.Reconnect), "30s") {
+		t.Fatalf("endpoint not stored as expected: %+v", stored)
+	}
+
+	res, _ = a.write(t, http.MethodPost, "/api/v1/endpoints",
+		`{"name":"qq-10001","kind":"upstream_dial","url":"ws://127.0.0.1:6700/"}`, csrf)
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate endpoint = %d, want 409", res.StatusCode)
+	}
+
+	// The token is never serialised back to the client.
+	res, payload = a.do(t, http.MethodGet, "/api/v1/endpoints", "", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("list endpoints = %d", res.StatusCode)
+	}
+	if strings.Contains(fmt.Sprintf("%v", payload), `"token":"sec"`) {
+		t.Fatalf("token leaked in the response: %v", payload)
+	}
+
+	// Updating without a token keeps the stored one.
+	res, _ = a.write(t, http.MethodPatch, fmt.Sprintf("/api/v1/endpoints/%d", stored.ID),
+		`{"name":"qq-10001","kind":"upstream_dial","url":"ws://127.0.0.1:6701/","account_hint":"10001","enabled":false}`, csrf)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("patch endpoint = %d", res.StatusCode)
+	}
+	updated, _ := a.st.EndpointByID(context.Background(), stored.ID)
+	if updated.URL != "ws://127.0.0.1:6701/" || updated.Enabled || updated.Token != "sec" {
+		t.Fatalf("endpoint not updated correctly: %+v", updated)
+	}
+
+	// Forced reconnect without a running dialer is a 404, not a crash.
+	res, _ = a.write(t, http.MethodPost, "/api/v1/endpoints/qq-10001/reconnect", "", csrf)
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("reconnect without a dialer = %d, want 404", res.StatusCode)
+	}
+
+	res, _ = a.write(t, http.MethodDelete, fmt.Sprintf("/api/v1/endpoints/%d", stored.ID), "", csrf)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("delete endpoint = %d", res.StatusCode)
+	}
+	if _, err := a.st.EndpointByName(context.Background(), "qq-10001"); err == nil {
+		t.Fatal("endpoint survived delete")
+	}
+}
+
 func TestEventsRecentAndFilters(t *testing.T) {
 	a := newTestAPI(t)
 	loginAdmin(t, a)

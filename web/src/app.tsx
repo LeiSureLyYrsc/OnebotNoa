@@ -9,6 +9,7 @@ import { BotsPage } from "./pages/bots";
 import { BindingsPage } from "./pages/bindings";
 import { EventsPage } from "./pages/events";
 import { ListenersPage } from "./pages/listeners";
+import { EndpointsPage } from "./pages/endpoints";
 
 const NAV: Array<{ id: PageId; label: string }> = [
   { id: "dashboard", label: "仪表盘" },
@@ -17,6 +18,7 @@ const NAV: Array<{ id: PageId; label: string }> = [
   { id: "bindings", label: "绑定关系" },
   { id: "events", label: "实时事件" },
   { id: "listeners", label: "监听端点" },
+  { id: "endpoints", label: "拨号目标" },
 ];
 
 export function App() {
@@ -139,6 +141,8 @@ function renderPage(page: PageId) {
       return <EventsPage />;
     case "listeners":
       return <ListenersPage />;
+    case "endpoints":
+      return <EndpointsPage />;
     default:
       return <DashboardPage />;
   }

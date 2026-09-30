@@ -341,6 +341,48 @@ export function deleteBinding(id: number): Promise<{ bindings: Binding[] }> {
   return call("/api/v1/bindings/" + id, { method: "DELETE" });
 }
 
+// ---------------------------------------------------------------- endpoints
+
+export interface EndpointState {
+  db_id?: number;
+  name: string;
+  kind: string;
+  url: string;
+  mode?: string;
+  account_hint?: string;
+  bot_id?: number;
+  bot_name?: string;
+  fixed_self_id?: string;
+  enabled: boolean;
+  source: string;
+  has_token: boolean;
+  state: string;
+  last_error?: string;
+  attempts: number;
+  connected_at?: string;
+  next_retry_at?: string;
+}
+
+export function listEndpoints(): Promise<{ endpoints: EndpointState[]; note?: string }> {
+  return call("/api/v1/endpoints");
+}
+
+export function createEndpoint(payload: Record<string, unknown>): Promise<{ endpoints: EndpointState[] }> {
+  return call("/api/v1/endpoints", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function updateEndpoint(id: number, payload: Record<string, unknown>): Promise<{ endpoints: EndpointState[] }> {
+  return call("/api/v1/endpoints/" + id, { method: "PATCH", body: JSON.stringify(payload) });
+}
+
+export function deleteEndpoint(id: number): Promise<{ deleted: string; endpoints: EndpointState[] }> {
+  return call("/api/v1/endpoints/" + id, { method: "DELETE" });
+}
+
+export function reconnectEndpoint(name: string): Promise<{ reconnecting: string }> {
+  return call("/api/v1/endpoints/" + encodeURIComponent(name) + "/reconnect", { method: "POST" });
+}
+
 // ---------------------------------------------------------------- listeners
 
 export function listListeners(): Promise<{ listeners: Listener[]; shared: Record<string, string>; runtime_note: string }> {

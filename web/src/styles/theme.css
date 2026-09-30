@@ -265,6 +265,11 @@ body {
   min-width: 120px;
 }
 
+.hub-input-sm {
+  width: 80px !important;
+  min-width: 80px !important;
+}
+
 .hub-json textarea {
   width: 100%;
   font-family: Consolas, "Courier New", monospace;

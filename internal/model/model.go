@@ -118,6 +118,10 @@ type Endpoint struct {
 	BotID       *int64          `json:"bot_id,omitempty"`
 	Reconnect   json.RawMessage `json:"reconnect"`
 	Enabled     bool            `json:"enabled"`
+	// Token is the credential the hub presents when it dials. It must be usable
+	// in the clear, so it is stored as-is and never serialised to the API.
+	Token    string `json:"-"`
+	HasToken bool   `json:"has_token"`
 	CreatedAt   time.Time       `json:"created_at"`
 	UpdatedAt   time.Time       `json:"updated_at"`
 }

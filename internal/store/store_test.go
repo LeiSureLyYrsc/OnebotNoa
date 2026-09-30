@@ -25,6 +25,18 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "test.db")
 
+	// Derive the expectation from the embedded migrations so this test keeps
+	// working as the schema grows.
+	expected, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	if len(expected) == 0 {
+		t.Fatal("no embedded migrations found")
+	}
+	wantVersion := expected[len(expected)-1].version
+	wantCount := len(expected)
+
 	st, err := Open(ctx, path)
 	if err != nil {
 		t.Fatalf("first open: %v", err)
@@ -34,8 +46,8 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 		"SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatalf("read migration version: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("schema version = %d, want 1", version)
+	if version != wantVersion {
+		t.Fatalf("schema version = %d, want %d", version, wantVersion)
 	}
 	if err := st.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -51,8 +63,8 @@ func TestOpenMigratesAndIsIdempotent(t *testing.T) {
 	if err := st2.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("schema_migrations rows = %d, want 1", count)
+	if count != wantCount {
+		t.Fatalf("schema_migrations rows = %d, want %d (migrations must not replay)", count, wantCount)
 	}
 }
 

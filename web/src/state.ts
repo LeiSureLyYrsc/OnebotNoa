@@ -2,7 +2,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { User } from "./api";
 
-export type PageId = "dashboard" | "accounts" | "bots" | "bindings" | "events" | "listeners";
+export type PageId = "dashboard" | "accounts" | "bots" | "bindings" | "events" | "listeners" | "endpoints";
 
 export interface AppState {
   user: User | null;

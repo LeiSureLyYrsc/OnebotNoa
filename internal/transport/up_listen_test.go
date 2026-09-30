@@ -72,6 +72,7 @@ type upstreamEnv struct {
 	policy  *hub.PolicyEngine
 	metrics *hub.Metrics
 	events  *hub.EventLog
+	ctx     context.Context
 }
 
 func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
@@ -116,7 +117,9 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	}
 	ts := httptest.NewServer(mux)
 
+	envCtx, cancelEnv := context.WithCancel(context.Background())
 	t.Cleanup(func() {
+		cancelEnv()
 		dp.CloseAll("test finished")
 		ts.Close()
 		_ = st.Close()
@@ -125,6 +128,7 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	return &upstreamEnv{
 		ts: ts, hub: relay, store: st, cfg: cfg, obs: obs,
 		policy: policy, metrics: metrics, events: events,
+		ctx: envCtx,
 	}
 }
 

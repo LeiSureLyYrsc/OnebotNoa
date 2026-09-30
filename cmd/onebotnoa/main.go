@@ -129,6 +129,10 @@ func runServe(args []string) error {
 
 	dataPlane := transport.NewDataPlane(cfg, st, relay, logger)
 
+	// Outbound connections: the hub dials QQ implementations and Bot servers.
+	dialManager := transport.NewDialManager(cfg, st, relay, logger)
+	dialManager.Start(ctx, transport.LoadEndpointSpecs(ctx, cfg, st, logger))
+
 	startedAt := time.Now()
 	mux := transport.NewMux(transport.Options{Version: version, StartedAt: startedAt, Logger: logger})
 	dataPlane.Register(mux)
@@ -144,6 +148,7 @@ func runServe(args []string) error {
 		Events:    eventLog,
 		Metrics:   metricsCollector,
 		Policy:    policyEngine,
+		Dialer:    dialManager,
 		Version:   version,
 		StartedAt: startedAt,
 	}).Register(mux)
@@ -186,6 +191,7 @@ func runServe(args []string) error {
 			"timeout", cfg.Server.ShutdownTimeout.Std().String())
 	}
 
+	dialManager.Stop()
 	dataPlane.CloseAll("server shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout.Std())
