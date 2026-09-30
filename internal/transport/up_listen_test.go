@@ -108,6 +108,12 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	relay.SetConnectHook(func(selfID string) {
 		policy.FlushOffline(selfID, func(frame []byte) bool { return relay.SendActionTo(selfID, frame) })
 	})
+	// Same composition as main: the relay answers get_*/can_* itself.
+	localService := hub.NewLocalService(relay, cfg.Policy.HeartbeatInterval.Std(), logger)
+	relay.Actions().SetLocalHandler(localService)
+	relay.SetDownstreamHooks(localService.OnConnect, localService.OnDisconnect)
+	localService.Start()
+	t.Cleanup(localService.Stop)
 
 	dp := NewDataPlane(cfg, st, relay, logger)
 	mux := http.NewServeMux()

@@ -159,22 +159,29 @@ func (l *LocalService) heartbeatFrame(account model.Account) []byte {
 
 // HandleAction implements LocalActionHandler. It returns true when the action was
 // answered locally.
-func (l *LocalService) HandleAction(ctx context.Context, conn *DownstreamConn, frame onebot.ActionFrame, origEcho json.RawMessage) bool {
+// HandleAction answers an action for the account the router already resolved.
+//
+// selfID is authoritative: the relay never guesses which account a request meant
+// (that decision belongs to the routing layer, which returns 1404 when it is
+// ambiguous), and it never answers for an account the caller cannot address.
+func (l *LocalService) HandleAction(ctx context.Context, conn *DownstreamConn, selfID string, frame onebot.ActionFrame, origEcho json.RawMessage) bool {
 	// The action name may carry the _async/_rate_limited suffixes.
 	action := onebot.BaseAction(frame.Action)
+	if selfID == "" {
+		selfID = conn.FixedSelfID()
+	}
+	if selfID == "" {
+		return false
+	}
 
 	switch action {
 	case "get_status":
-		conn.Send(onebot.SuccessResponse(origEcho, l.statusData(ctx, conn)))
+		conn.Send(onebot.SuccessResponse(origEcho, l.statusData(ctx, conn, selfID)))
 		return true
 	case "get_version_info":
 		conn.Send(onebot.SuccessResponse(origEcho, []byte(`{"app_name":"OnebotNoa","protocol_version":"v11","app_version":"relay"}`)))
 		return true
 	case "get_login_info":
-		selfID, ok := l.singleAccount(conn)
-		if !ok {
-			return false // ambiguous: let the upstream answer
-		}
 		account, err := l.hub.store.AccountBySelfID(ctx, selfID)
 		if err != nil {
 			return false
@@ -194,39 +201,66 @@ func (l *LocalService) HandleAction(ctx context.Context, conn *DownstreamConn, f
 	case "hub_list_accounts":
 		conn.Send(onebot.SuccessResponse(origEcho, l.accountsData(conn)))
 		return true
+	case "hub_get_account":
+		if data, ok := l.accountData(ctx, selfID); ok {
+			conn.Send(onebot.SuccessResponse(origEcho, data))
+			return true
+		}
+		return false
 	}
 	return false
 }
 
-// statusData reports aggregate relay health plus the per-account view.
-func (l *LocalService) statusData(ctx context.Context, conn *DownstreamConn) []byte {
-	status := l.hub.Status()
-	accounts := map[string]any{}
-	for _, binding := range conn.Bindings() {
-		if !binding.Enabled {
-			continue
-		}
-		account, err := l.hub.store.AccountByID(ctx, binding.AccountID)
-		if err != nil {
-			continue
-		}
-		state := model.StatusOffline
-		if session, ok := l.hub.Registry().Session(account.SelfID); ok {
-			state = session.State()
-		}
-		accounts[account.SelfID] = state
+// statusData reports the resolved account's state plus the relay's own health.
+//
+// Reporting only the addressed account matters for a multi-account Bot: a single
+// "online" flag covering every binding would let one offline account silently
+// mask another's failure.
+func (l *LocalService) statusData(ctx context.Context, conn *DownstreamConn, selfID string) []byte {
+	state := model.StatusOffline
+	if session, ok := l.hub.Registry().Session(selfID); ok {
+		state = session.State()
 	}
+	online := state == model.StatusOnline || state == model.StatusDegraded
 	payload := map[string]any{
-		"online":        status.Online > 0,
-		"good":          status.Online > 0 && status.Degraded == 0,
-		"accounts":      accounts,
-		"account_count": len(accounts),
+		"online": online,
+		"good":   state == model.StatusOnline,
+		"state":  state,
+		"self_id": selfID,
+		"app_name": "OnebotNoa",
+		"accounts": map[string]any{selfID: state},
+		"account_count": 1,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return []byte("{}")
 	}
 	return data
+}
+
+// accountData describes one account (the hub_get_account extension).
+func (l *LocalService) accountData(ctx context.Context, selfID string) ([]byte, bool) {
+	account, err := l.hub.store.AccountBySelfID(ctx, selfID)
+	if err != nil {
+		return nil, false
+	}
+	state := model.StatusOffline
+	peers := 0
+	if session, ok := l.hub.Registry().Session(selfID); ok {
+		state = session.State()
+		peers = len(session.Peers())
+	}
+	data, err := json.Marshal(map[string]any{
+		"self_id":  account.SelfID,
+		"name":     account.Name,
+		"nickname": account.Nickname,
+		"state":    state,
+		"peers":    peers,
+	})
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // accountsData backs the hub_list_accounts extension action.
@@ -257,28 +291,6 @@ func (l *LocalService) accountsData(conn *DownstreamConn) []byte {
 		return []byte(`{"accounts":[]}`)
 	}
 	return data
-}
-
-// singleAccount returns the account a connection unambiguously addresses:
-// the transparent view's account, or the only enabled binding.
-func (l *LocalService) singleAccount(conn *DownstreamConn) (string, bool) {
-	if fixed := conn.FixedSelfID(); fixed != "" {
-		return fixed, true
-	}
-	enabled := []model.Binding{}
-	for _, binding := range conn.Bindings() {
-		if binding.Enabled {
-			enabled = append(enabled, binding)
-		}
-	}
-	if len(enabled) != 1 {
-		return "", false
-	}
-	account, err := l.hub.store.AccountByID(context.Background(), enabled[0].AccountID)
-	if err != nil {
-		return "", false
-	}
-	return account.SelfID, true
 }
 
 // jsonNumber keeps an id numeric in JSON (OneBot sends ids as numbers).

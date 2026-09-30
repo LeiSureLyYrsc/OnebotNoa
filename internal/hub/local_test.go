@@ -68,8 +68,8 @@ func TestLocalServiceAnswersReadOnlyActions(t *testing.T) {
 	relay, service, _, bot, account := newLocalTestHub(t)
 	conn, peer := attachDownstream(t, relay, bot, account.ID)
 
-	for _, action := range []string{"get_status", "get_version_info", "can_send_image", "hub_list_accounts"} {
-		handled := service.HandleAction(context.Background(), conn, onebot.ActionFrame{
+	for _, action := range []string{"get_status", "get_version_info", "can_send_image", "hub_list_accounts", "hub_get_account"} {
+		handled := service.HandleAction(context.Background(), conn, account.SelfID, onebot.ActionFrame{
 			Action: action,
 			Echo:   json.RawMessage(`1`),
 		}, json.RawMessage(`1`))
@@ -79,8 +79,8 @@ func TestLocalServiceAnswersReadOnlyActions(t *testing.T) {
 	}
 
 	frames := peer.sentFrames()
-	if len(frames) != 4 {
-		t.Fatalf("frames = %d, want 4", len(frames))
+	if len(frames) != 5 {
+		t.Fatalf("frames = %d, want 5", len(frames))
 	}
 	for _, frame := range frames {
 		var resp struct {
@@ -116,24 +116,21 @@ func TestLocalServiceAnswersReadOnlyActions(t *testing.T) {
 	}
 }
 
-func TestLocalServiceDefersAmbiguousGetLoginInfo(t *testing.T) {
-	relay, service, st, bot, account := newLocalTestHub(t)
-	other, err := st.CreateAccount(context.Background(), "50002", "第二个号", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, _ := attachDownstream(t, relay, bot, account.ID, other.ID)
+// TestLocalServiceRequiresAResolvedAccount pins the contract with the routing
+// layer: the relay never guesses which account a request meant. Ambiguity is
+// resolved by the router (which answers 1404) before this handler is reached.
+func TestLocalServiceRequiresAResolvedAccount(t *testing.T) {
+	relay, service, _, bot, account := newLocalTestHub(t)
+	conn, _ := attachDownstream(t, relay, bot, account.ID)
 
-	// Two bound accounts: the relay cannot know which login info is meant, so it
-	// must let the upstream answer.
-	if service.HandleAction(context.Background(), conn, onebot.ActionFrame{Action: "get_login_info"}, nil) {
-		t.Fatal("ambiguous get_login_info must not be answered locally")
+	if service.HandleAction(context.Background(), conn, "", onebot.ActionFrame{Action: "get_login_info"}, nil) {
+		t.Fatal("an unresolved account must not be answered locally")
 	}
 
-	// With a single account the relay answers with the cached identity.
+	// With the resolved account the relay answers from the cached identity.
 	single, peer := attachDownstream(t, relay, bot, account.ID)
-	if !service.HandleAction(context.Background(), single, onebot.ActionFrame{Action: "get_login_info"}, nil) {
-		t.Fatal("unambiguous get_login_info should be answered locally")
+	if !service.HandleAction(context.Background(), single, account.SelfID, onebot.ActionFrame{Action: "get_login_info"}, nil) {
+		t.Fatal("a resolved get_login_info should be answered locally")
 	}
 	frames := peer.sentFrames()
 	if len(frames) != 1 {

@@ -76,6 +76,7 @@ func (d *DataPlane) Register(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+down.Path, d.handleDownstreamWS)
 		mux.HandleFunc("GET "+down.Path+"/{rest...}", d.handleDownstreamWS)
 	}
+	d.RegisterHTTP(mux)
 }
 
 // CloseAll closes every live data-plane connection (graceful shutdown).

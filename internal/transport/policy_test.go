@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -102,7 +103,7 @@ func TestReadOnlyActionsBypassTheAccountBucket(t *testing.T) {
 	waitFor(t, "downstream connection", 3*time.Second, func() bool { return env.hub.DownstreamCount() == 1 })
 
 	for i := 0; i < 5; i++ {
-		frame := fmt.Sprintf(`{"action":"get_status","echo":%d}`, i)
+		frame := fmt.Sprintf(`{"action":"get_group_list","echo":%d}`, i)
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
 			t.Fatal(err)
 		}
@@ -144,7 +145,7 @@ func TestActionPolicyDenyList(t *testing.T) {
 	}
 
 	// Read-only actions are still allowed.
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status","echo":3}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list","echo":3}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, key := impl.readAction(3 * time.Second); key == "" {
@@ -167,7 +168,7 @@ func TestActionPolicyAllowList(t *testing.T) {
 	waitFor(t, "downstream connection", 3*time.Second, func() bool { return env.hub.DownstreamCount() == 1 })
 
 	// Not on the list -> refused, even though it is read-only.
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status","echo":"no"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list","echo":"no"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, retcode, wording, _ := readBotResponse(t, conn, 3*time.Second); retcode != 1403 || !strings.Contains(wording, "白名单") {
@@ -254,7 +255,11 @@ func TestSlowBotIsIsolatedByBackpressure(t *testing.T) {
 	payload := strings.Repeat("x", 8*1024)
 	go func() {
 		for i := 0; i < total; i++ {
-			impl.write(fmt.Sprintf(`{"post_type":"message","message_type":"group","self_id":70006,"user_id":%d,"message":"%s"}`, i, payload))
+			// The relay may legitimately close the upstream connection when the
+			// slow peer trips a disconnect policy; the writer tolerates that.
+			if !impl.writeOK(fmt.Sprintf(`{"post_type":"message","message_type":"group","self_id":70006,"user_id":%d,"message":"%s"}`, i, payload)) {
+				return
+			}
 			time.Sleep(2 * time.Millisecond)
 		}
 	}()
@@ -264,8 +269,13 @@ func TestSlowBotIsIsolatedByBackpressure(t *testing.T) {
 	deadline := time.Now().Add(25 * time.Second)
 	for received < total && time.Now().Before(deadline) {
 		_ = fastConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		if _, _, err := fastConn.ReadMessage(); err != nil {
+		_, data, err := fastConn.ReadMessage()
+		if err != nil {
 			t.Fatalf("fast bot read failed after %d frames: %v", received, err)
+		}
+		// Synthesised meta events also arrive here; only count real traffic.
+		if !bytes.Contains(data, []byte(`"message_type":"group"`)) {
+			continue
 		}
 		received++
 	}
@@ -373,7 +383,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	waitFor(t, "downstream connection", 3*time.Second, func() bool { return env.hub.DownstreamCount() == 1 })
 
 	impl.write(`{"post_type":"message","message_type":"group","self_id":70009,"user_id":1,"message":"hi"}`)
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status","echo":"m"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list","echo":"m"}`)); err != nil {
 		t.Fatal(err)
 	}
 	_, key := impl.readAction(3 * time.Second)

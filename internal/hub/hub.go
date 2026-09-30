@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -301,6 +302,33 @@ func (h *Hub) onUpstreamActionResult(session *AccountSession, peer Peer, raw []b
 	if h.dispatcher != nil {
 		h.dispatcher.RouteActionResult(session, peer, raw)
 	}
+}
+
+// IngestEvent routes an event that arrived over HTTP instead of a WebSocket.
+//
+// The relay treats it exactly like a frame read from the upstream socket: it is
+// metered, recorded in the live view and multicast to every bound Bot with the
+// original bytes. The account must already exist (HTTP clients identify
+// themselves with X-Self-ID, which the transport resolved before calling here).
+func (h *Hub) IngestEvent(ctx context.Context, selfID string, raw []byte) error {
+	session, ok := h.registry.Session(selfID)
+	if !ok {
+		// No WebSocket session: make sure the account exists so the event has an
+		// owner, then route it directly.
+		if _, err := h.store.EnsureAccount(ctx, selfID, "", "http"); err != nil {
+			return fmt.Errorf("hub: %w", err)
+		}
+		h.registry.notifyFrame(selfID, onebot.RoleUniversal, raw)
+		if meta, ok := onebot.ParseEventMeta(raw); ok {
+			h.router.RouteEventBySelfID(selfID, meta, raw)
+		}
+		return nil
+	}
+	h.registry.notifyFrame(session.SelfID(), onebot.RoleUniversal, raw)
+	if meta, ok := onebot.ParseEventMeta(raw); ok {
+		h.router.RouteEvent(session, meta, raw)
+	}
+	return nil
 }
 
 // SendActionTo forwards an already-encoded action frame to an account.

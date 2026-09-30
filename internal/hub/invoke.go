@@ -115,11 +115,6 @@ func (h *Hub) consoleConnection(peer Peer, selfID string) *DownstreamConn {
 // offline queue all apply, because "the second Bot gets refused here" is exactly
 // what the operator wants to find out.
 func (h *Hub) Invoke(ctx context.Context, selfID string, frame []byte, echo json.RawMessage, async bool) (json.RawMessage, error) {
-	session, ok := h.registry.Session(selfID)
-	if !ok || !session.CanSendActions() {
-		return nil, fmt.Errorf("%w: %s", ErrNoTarget, selfID)
-	}
-
 	var parsed onebot.ActionFrame
 	if err := json.Unmarshal(frame, &parsed); err != nil {
 		return nil, fmt.Errorf("invalid action frame: %w", err)
@@ -128,17 +123,16 @@ func (h *Hub) Invoke(ctx context.Context, selfID string, frame []byte, echo json
 	peer := newConsolePeer("console-"+strconv.FormatUint(h.actions.seq.Add(1), 10), selfID, 1)
 	defer peer.Close(0, "console done")
 
-	// The debugger must reproduce what a Bot would experience, so the actions the
-	// relay serves itself (get_status, can_*, hub_*) are answered locally first,
-	// exactly as they are on the real downstream path — including the bindings,
-	// because hub_list_accounts and the per-account status are built from them.
+	// The debugger must reproduce what a Bot would experience: the relay answers
+	// the actions it serves itself (get_status, can_*, hub_*) locally, for the
+	// account the caller named, before anything is forwarded upstream.
 	if h.actions.local != nil {
 		consoleEcho := echo
 		if len(consoleEcho) == 0 {
 			consoleEcho = json.RawMessage(strconv.Quote("console"))
 		}
 		consoleConn := h.consoleConnection(peer, selfID)
-		if h.actions.local.HandleAction(ctx, consoleConn, parsed, consoleEcho) {
+		if h.actions.local.HandleAction(ctx, consoleConn, selfID, parsed, consoleEcho) {
 			select {
 			case raw := <-peer.reply:
 				return json.RawMessage(raw), nil
@@ -146,6 +140,16 @@ func (h *Hub) Invoke(ctx context.Context, selfID string, frame []byte, echo json
 				return nil, ErrNoReply
 			}
 		}
+	}
+
+	// Actions the relay does not implement need a live, API-capable session.
+	session, ok := h.registry.Session(selfID)
+	if !ok || !session.CanSendActions() {
+		state := "offline"
+		if ok {
+			state = session.State()
+		}
+		return nil, fmt.Errorf("%w: %s is %s", ErrNoTarget, selfID, state)
 	}
 
 	key := "hub@" + peer.ID() + ":1"

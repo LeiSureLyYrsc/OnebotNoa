@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -169,14 +170,22 @@ func (s *fakeBotServer) url(path string) string {
 	return "ws" + strings.TrimPrefix(s.ts.URL, "http") + path
 }
 
+// nextEvent waits for real traffic, skipping the meta events the relay
+// synthesises on connect (lifecycle/heartbeat).
 func (s *fakeBotServer) nextEvent(t *testing.T, timeout time.Duration) []byte {
 	t.Helper()
-	select {
-	case frame := <-s.events:
-		return frame
-	case <-time.After(timeout):
-		t.Fatal("timed out waiting for an event pushed by the relay")
-		return nil
+	deadline := time.After(timeout)
+	for {
+		select {
+		case frame := <-s.events:
+			if bytes.Contains(frame, []byte(`"post_type":"meta_event"`)) {
+				continue
+			}
+			return frame
+		case <-deadline:
+			t.Fatal("timed out waiting for an event pushed by the relay")
+			return nil
+		}
 	}
 }
 
@@ -303,7 +312,7 @@ func TestDownstreamDialPushesEventsAndReceivesActions(t *testing.T) {
 	}
 
 	// The dialed Bot calls an API: the QQ side must receive it.
-	botServer.write(t, `{"action":"get_status","echo":"s1"}`)
+	botServer.write(t, `{"action":"get_group_list","echo":"s1"}`)
 	if _, key := impl.readAction(3 * time.Second); key == "" {
 		t.Fatal("action from the dialed Bot did not reach the implementation")
 	}

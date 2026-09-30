@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -116,6 +117,12 @@ func (f *fakeImpl) write(raw string) {
 	}
 }
 
+// writeOK reports whether the frame was delivered. Used by stress tests where
+// the relay may legitimately close the upstream connection midway.
+func (f *fakeImpl) writeOK(raw string) bool {
+	return f.conn.WriteMessage(websocket.TextMessage, []byte(raw)) == nil
+}
+
 // dialBot connects a Bot to the downstream endpoint.
 func (e *upstreamEnv) dialBot(t *testing.T, token, suffix string) *websocket.Conn {
 	t.Helper()
@@ -133,8 +140,26 @@ func (e *upstreamEnv) dialBot(t *testing.T, token, suffix string) *websocket.Con
 	return conn
 }
 
-// readBotFrame reads one frame with a deadline.
+// readBotFrame reads one frame with a deadline, skipping the meta events the
+// relay synthesises on its own (lifecycle/heartbeat) so a test always asserts on
+// the traffic it actually triggered.
 func readBotFrame(t *testing.T, conn *websocket.Conn, timeout time.Duration) []byte {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		data := readBotFrameRaw(t, conn, time.Until(deadline))
+		if bytes.Contains(data, []byte(`"post_type":"meta_event"`)) {
+			if time.Now().After(deadline) {
+				t.Fatal("only synthesised meta events arrived before the deadline")
+			}
+			continue
+		}
+		return data
+	}
+}
+
+// readBotFrameRaw returns the very next frame, including meta events.
+func readBotFrameRaw(t *testing.T, conn *websocket.Conn, timeout time.Duration) []byte {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	_, data, err := conn.ReadMessage()
@@ -285,7 +310,7 @@ func TestActionWithoutEchoGetsEchoRemovedOnReply(t *testing.T) {
 	conn := env.dialBot(t, token, "")
 	waitFor(t, "downstream connection", 3*time.Second, func() bool { return env.hub.DownstreamCount() == 1 })
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list"}`)); err != nil {
 		t.Fatal(err)
 	}
 	_, key := impl.readAction(3 * time.Second)
@@ -432,7 +457,7 @@ func TestTargetResolutionRules(t *testing.T) {
 	waitFor(t, "downstream connection", 3*time.Second, func() bool { return env.hub.DownstreamCount() == 1 })
 
 	// 1. No hint and two bindings (one default) -> the default account.
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status","echo":"d"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list","echo":"d"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, key := implA.readAction(3 * time.Second); key == "" {
@@ -441,7 +466,7 @@ func TestTargetResolutionRules(t *testing.T) {
 
 	// 2. frame-level self_id wins.
 	if err := conn.WriteMessage(websocket.TextMessage,
-		[]byte(`{"action":"get_status","self_id":10009,"echo":"f"}`)); err != nil {
+		[]byte(`{"action":"get_group_list","self_id":10009,"echo":"f"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, key := implB.readAction(3 * time.Second); key == "" {
@@ -450,7 +475,7 @@ func TestTargetResolutionRules(t *testing.T) {
 
 	// 3. params.self_id also works.
 	if err := conn.WriteMessage(websocket.TextMessage,
-		[]byte(`{"action":"get_status","params":{"self_id":10009},"echo":"p"}`)); err != nil {
+		[]byte(`{"action":"get_group_list","params":{"self_id":10009},"echo":"p"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, key := implB.readAction(3 * time.Second); key == "" {
@@ -459,7 +484,7 @@ func TestTargetResolutionRules(t *testing.T) {
 
 	// 4. An unbound account is refused with 1403.
 	if err := conn.WriteMessage(websocket.TextMessage,
-		[]byte(`{"action":"get_status","self_id":99999,"echo":"x"}`)); err != nil {
+		[]byte(`{"action":"get_group_list","self_id":99999,"echo":"x"}`)); err != nil {
 		t.Fatal(err)
 	}
 	got := string(readBotFrame(t, conn, 3*time.Second))
@@ -481,7 +506,7 @@ func TestAmbiguousTargetReturns1404(t *testing.T) {
 	conn := env.dialBot(t, token, "")
 	waitFor(t, "downstream connection", 3*time.Second, func() bool { return env.hub.DownstreamCount() == 1 })
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status","echo":"a"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list","echo":"a"}`)); err != nil {
 		t.Fatal(err)
 	}
 	got := string(readBotFrame(t, conn, 3*time.Second))
@@ -509,7 +534,7 @@ func TestTransparentSingleAccountView(t *testing.T) {
 	waitFor(t, "downstream connection", 3*time.Second, func() bool { return env.hub.DownstreamCount() == 1 })
 
 	// Actions need no self_id at all.
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status","echo":"t"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list","echo":"t"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, key := implA.readAction(3 * time.Second); key == "" {
@@ -552,7 +577,7 @@ func TestMalformedAndNonActionFrames(t *testing.T) {
 	expectNoBotFrame(t, conn, 200*time.Millisecond)
 
 	// The connection is still usable afterwards.
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_status","echo":"still-alive"}`)); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"get_group_list","echo":"still-alive"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, key := impl.readAction(2 * time.Second); key == "" {

@@ -14,9 +14,14 @@ import (
 )
 
 // LocalActionHandler answers actions that the hub serves itself (get_status,
-// get_login_info, x_hub extensions). Implemented in I7.
+// get_login_info, hub_* extensions).
+//
+// It runs only after the target account has been resolved, so an implementation
+// may rely on conn.ResolveTarget-equivalent context being valid and must not be
+// asked to guess which account an ambiguous request meant.
 type LocalActionHandler interface {
-	HandleAction(ctx context.Context, conn *DownstreamConn, frame onebot.ActionFrame, origEcho json.RawMessage) bool
+	// selfID is the account the router resolved for this request.
+	HandleAction(ctx context.Context, conn *DownstreamConn, selfID string, frame onebot.ActionFrame, origEcho json.RawMessage) bool
 }
 
 // PreSendHook gates an outbound action: allow/deny lists, quotas, in-flight
@@ -88,10 +93,9 @@ func (r *ActionRouter) HandleAction(ctx context.Context, conn *DownstreamConn, r
 		return
 	}
 
-	if r.local != nil && r.local.HandleAction(ctx, conn, frame, frame.Echo) {
-		return
-	}
-
+	// The target is resolved BEFORE the relay considers answering locally: an
+	// ambiguous or unauthorised request must be refused (1404/1403), not silently
+	// answered on behalf of "all bound accounts".
 	selfID, binding, retcode, wording := conn.ResolveTarget(frame)
 	if retcode != 0 {
 		r.reject(conn, frame, retcode, wording)
@@ -99,6 +103,10 @@ func (r *ActionRouter) HandleAction(ctx context.Context, conn *DownstreamConn, r
 	}
 
 	bot := conn.Bot()
+
+	if r.local != nil && r.local.HandleAction(ctx, conn, selfID, frame, frame.Echo) {
+		return
+	}
 
 	// The scope is parsed before the policy runs so a malformed binding can
 	// never leave a reserved rate-limit slot behind.

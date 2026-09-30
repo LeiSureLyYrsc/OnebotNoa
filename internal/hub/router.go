@@ -63,6 +63,38 @@ func (r *Router) RouteEvent(session *AccountSession, meta onebot.EventMeta, raw 
 	}
 }
 
+// RouteEventBySelfID multicasts an event whose sender has no live session (for
+// example an event delivered over HTTP).
+func (r *Router) RouteEventBySelfID(selfID string, meta onebot.EventMeta, raw []byte) {
+	account, err := r.hub.store.AccountBySelfID(context.Background(), selfID)
+	if err != nil {
+		r.logger.Warn("event from an unknown account was dropped", "self_id", selfID)
+		return
+	}
+	bindings := r.hub.bindingsForAccount(context.Background(), account.ID)
+	if len(bindings) == 0 {
+		return
+	}
+	for _, b := range bindings {
+		if !b.Enabled {
+			continue
+		}
+		scope, err := ParseScope(b.Scope)
+		if err != nil {
+			continue
+		}
+		if !scope.Match(meta, r.hub.cfg.Policy.MetaEvents) {
+			continue
+		}
+		for _, conn := range r.hub.DownstreamsForBot(b.BotID) {
+			if !conn.wantsAccount(account.ID) {
+				continue
+			}
+			conn.Send(raw)
+		}
+	}
+}
+
 // RouteActionResult hands an upstream reply to the action router.
 func (r *Router) RouteActionResult(_ *AccountSession, _ Peer, raw []byte) {
 	r.actions.HandleResponse(raw)
