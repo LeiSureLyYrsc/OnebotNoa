@@ -10,6 +10,8 @@ import { BindingsPage } from "./pages/bindings";
 import { EventsPage } from "./pages/events";
 import { ListenersPage } from "./pages/listeners";
 import { EndpointsPage } from "./pages/endpoints";
+import { ConsolePage } from "./pages/console";
+import { LogsPage } from "./pages/logs";
 
 const NAV: Array<{ id: PageId; label: string }> = [
   { id: "dashboard", label: "仪表盘" },
@@ -17,6 +19,8 @@ const NAV: Array<{ id: PageId; label: string }> = [
   { id: "bots", label: "Bot 实例" },
   { id: "bindings", label: "绑定关系" },
   { id: "events", label: "实时事件" },
+  { id: "console", label: "API 调试台" },
+  { id: "logs", label: "日志审计" },
   { id: "listeners", label: "监听端点" },
   { id: "endpoints", label: "拨号目标" },
 ];
@@ -143,6 +147,10 @@ function renderPage(page: PageId) {
       return <ListenersPage />;
     case "endpoints":
       return <EndpointsPage />;
+    case "console":
+      return <ConsolePage />;
+    case "logs":
+      return <LogsPage />;
     default:
       return <DashboardPage />;
   }

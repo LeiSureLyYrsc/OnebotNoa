@@ -341,6 +341,56 @@ export function deleteBinding(id: number): Promise<{ bindings: Binding[] }> {
   return call("/api/v1/bindings/" + id, { method: "DELETE" });
 }
 
+// ---------------------------------------------------------------- console
+
+export interface ConsoleResult {
+  sent: boolean;
+  self_id: string;
+  action: string;
+  request?: unknown;
+  response?: unknown;
+  elapsed_ms: number;
+  error?: string;
+}
+
+export function invokeConsole(payload: Record<string, unknown>): Promise<ConsoleResult> {
+  return call("/api/v1/console/invoke", { method: "POST", body: JSON.stringify(payload) });
+}
+
+// ------------------------------------------------------------- logs & audit
+
+export interface AuditEntry {
+  id: number;
+  at: string;
+  actor: string;
+  action: string;
+  target: string;
+  detail: string;
+  ip: string;
+}
+
+function queryString(filter: Record<string, string>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filter)) {
+    if (value.trim()) params.set(key, value.trim());
+  }
+  const text = params.toString();
+  return text ? "?" + text : "";
+}
+
+export function listLogs(filter: Record<string, string> = {}): Promise<{
+  logs: EventRecord[];
+  ring_size: number;
+  subscribers: number;
+  dropped: number;
+}> {
+  return call("/api/v1/logs" + queryString(filter));
+}
+
+export function listAudit(filter: Record<string, string> = {}): Promise<{ entries: AuditEntry[]; total: number }> {
+  return call("/api/v1/audit" + queryString(filter));
+}
+
 // ---------------------------------------------------------------- endpoints
 
 export interface EndpointState {

@@ -197,32 +197,45 @@ func FrameType(raw []byte) string {
 // FailureResponse builds a OneBot failure reply. wording carries the
 // human-readable reason (go-cqhttp/NapCat convention).
 func FailureResponse(echo json.RawMessage, retcode int, wording string) []byte {
-	out, err := json.Marshal(ResponseFrame{
-		Status:  "failed",
-		Retcode: retcode,
-		Data:    json.RawMessage("null"),
-		Wording: wording,
-		Echo:    echo,
-	})
-	if err != nil {
-		return []byte(`{"status":"failed","retcode":1200,"data":null}`)
-	}
-	return out
+	return buildResponse("failed", retcode, wording, echo, json.RawMessage("null"))
 }
 
 // SuccessResponse builds a OneBot success reply with raw data.
 func SuccessResponse(echo json.RawMessage, data json.RawMessage) []byte {
+	return buildResponse("ok", RetOK, "", echo, data)
+}
+
+// buildResponse marshals a reply. A malformed echo (or data) must never blank
+// out the payload, so the offending field is dropped instead of failing the
+// whole frame.
+func buildResponse(status string, retcode int, wording string, echo, data json.RawMessage) []byte {
 	if len(data) == 0 {
 		data = json.RawMessage("null")
 	}
+	if len(echo) > 0 && !json.Valid(echo) {
+		echo = nil
+	}
+	if !json.Valid(data) {
+		data = json.RawMessage("null")
+	}
 	out, err := json.Marshal(ResponseFrame{
-		Status:  "ok",
-		Retcode: RetOK,
+		Status:  status,
+		Retcode: retcode,
 		Data:    data,
+		Wording: wording,
 		Echo:    echo,
 	})
 	if err != nil {
-		return []byte(`{"status":"ok","retcode":0,"data":null}`)
+		// Last resort: a minimal but valid frame.
+		fallback, marshalErr := json.Marshal(map[string]any{
+			"status":  status,
+			"retcode": retcode,
+			"data":    json.RawMessage(data),
+		})
+		if marshalErr != nil {
+			return []byte(`{"status":"failed","retcode":1200,"data":null}`)
+		}
+		return fallback
 	}
 	return out
 }

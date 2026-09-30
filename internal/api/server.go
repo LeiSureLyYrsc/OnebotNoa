@@ -108,6 +108,13 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/endpoints/{id}", s.requireAuth(s.handleDeleteEndpoint))
 	mux.HandleFunc("POST /api/v1/endpoints/{name}/reconnect", s.requireAuth(s.handleReconnectEndpoint))
 
+	// API debugger
+	mux.HandleFunc("POST /api/v1/console/invoke", s.requireAuth(s.handleConsoleInvoke))
+
+	// Audit trail and the log pane (the live-view ring, newest first)
+	mux.HandleFunc("GET /api/v1/audit", s.requireAuth(s.handleListAudit))
+	mux.HandleFunc("GET /api/v1/logs", s.requireAuth(s.handleLogs))
+
 	// Live activity
 	mux.HandleFunc("GET /api/v1/events/recent", s.requireAuth(s.handleRecentEvents))
 	mux.HandleFunc("GET /api/v1/events/stream", s.requireAuth(s.handleEventStream))

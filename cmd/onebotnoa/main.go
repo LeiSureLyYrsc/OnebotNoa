@@ -119,6 +119,14 @@ func runServe(args []string) error {
 	relay.SetObserver(hub.FanOutObserver{eventLog, metricsCollector})
 	relay.Actions().SetTrafficObserver(hub.FanOutTraffic{eventLog, metricsCollector})
 	relay.Actions().SetPreSend(policyEngine)
+	// The relay answers the get_*/can_* actions itself and re-states account
+	// state downstream, so third-party frameworks show the right status.
+	localService := hub.NewLocalService(relay, cfg.Policy.HeartbeatInterval.Std(), logger)
+	relay.Actions().SetLocalHandler(localService)
+	relay.SetDownstreamHooks(localService.OnConnect, localService.OnDisconnect)
+	localService.Start()
+	defer localService.Stop()
+
 	// Actions buffered while an account was offline are flushed on reconnect.
 	relay.SetConnectHook(func(selfID string) {
 		policyEngine.FlushOffline(selfID, func(frame []byte) bool {

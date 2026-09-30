@@ -270,6 +270,32 @@ body {
   min-width: 80px !important;
 }
 
+/* API debugger + log panes */
+
+.hub-console {
+  margin-bottom: 10px;
+}
+
+.hub-console-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.hub-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 10px;
+}
+
+.hub-logpane {
+  max-height: 58vh;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #b5b3a8;
+}
+
 .hub-json textarea {
   width: 100%;
   font-family: Consolas, "Courier New", monospace;
