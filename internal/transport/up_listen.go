@@ -50,7 +50,26 @@ func (d *DataPlane) handleUpstreamWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if d.cfg.OneBot.UpstreamWS.RequireToken && !d.authorizedUpstream(token, boundSelfID) {
+	// A dedicated listener narrows who may connect; the shared endpoint keeps
+	// the configured policy.
+	if binding, dedicated := bindingOf(r.Context()); dedicated {
+		switch d.authorizeUpstreamListener(binding, token, boundSelfID, selfID) {
+		case listenerAuthNoCredential:
+			d.logger.Warn("dedicated upstream listener rejected a connection",
+				"listener", binding.Name, "addr", remoteAddr, "self_id", selfID, "token_source", tokenSource)
+			http.Error(w, "unauthorized for this listener", http.StatusUnauthorized)
+			return
+		case listenerAuthForeignAccount:
+			d.logger.Warn("dedicated upstream listener rejected a foreign self_id",
+				"listener", binding.Name, "wanted", binding.AccountHint, "got", selfID)
+			http.Error(w, "wrong self_id for this listener", http.StatusForbidden)
+			return
+		}
+		// The listener decides the account, so a connection cannot claim another.
+		if selfID == "" {
+			selfID = binding.AccountHint
+		}
+	} else if d.cfg.OneBot.UpstreamWS.RequireToken && !d.authorizedUpstream(token, boundSelfID) {
 		d.logger.Warn("upstream connection rejected: bad or missing token",
 			"addr", remoteAddr, "self_id", selfID, "token_source", tokenSource)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -83,6 +102,13 @@ func (d *DataPlane) handleUpstreamWS(w http.ResponseWriter, r *http.Request) {
 	d.track(peer)
 	defer d.untrack(peer)
 
+	source := "upstream_ws"
+	if binding, dedicated := bindingOf(r.Context()); dedicated {
+		source = "listener:" + binding.Name
+		// The listener is authoritative: it pre-binds the account so the relay
+		// never has to guess from headers.
+		boundSelfID = binding.AccountHint
+	}
 	info := hub.UpstreamInfo{
 		SelfID:             selfID,
 		Role:               role,
@@ -90,7 +116,7 @@ func (d *DataPlane) handleUpstreamWS(w http.ResponseWriter, r *http.Request) {
 		UserAgent:          r.UserAgent(),
 		TokenFingerprint:   tokenFP,
 		TokenAccountSelfID: boundSelfID,
-		Source:             "upstream_ws",
+		Source:             source,
 	}
 
 	d.logger.Info("upstream connection accepted",

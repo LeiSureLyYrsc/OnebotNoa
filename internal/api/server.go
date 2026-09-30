@@ -37,6 +37,7 @@ type Options struct {
 	Metrics   *hub.Metrics
 	Policy    *hub.PolicyEngine
 	Dialer    Dialer
+	Listeners ListenerRuntime
 	Version   string
 	StartedAt time.Time
 }
@@ -47,6 +48,11 @@ type Server struct {
 	logger  *slog.Logger
 	limiter *loginLimiter
 }
+
+// SetListenerRuntime installs the dedicated-listener runtime after
+// construction. main builds the listener manager and the API server from the
+// same wiring, so this exists for tests and for future hot-reconfiguration.
+func (s *Server) SetListenerRuntime(runtime ListenerRuntime) { s.opt.Listeners = runtime }
 
 // New builds the API server.
 func New(opt Options) *Server {

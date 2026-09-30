@@ -46,6 +46,22 @@ func (d *DataPlane) handleDownstreamWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A dedicated downstream listener serves exactly one Bot, and may also pin
+	// the single account that Bot sees on this address.
+	source := "downstream_ws"
+	if binding, dedicated := bindingOf(r.Context()); dedicated {
+		if !d.downstreamListenerAllows(r.Context(), binding, token) {
+			d.logger.Warn("dedicated downstream listener rejected a connection",
+				"listener", binding.Name, "bot", bot.Name, "addr", remoteAddr)
+			http.Error(w, "this listener belongs to another bot", http.StatusForbidden)
+			return
+		}
+		source = "listener:" + binding.Name
+		if binding.FixedSelfID != "" && fixedSelfID == "" {
+			fixedSelfID = binding.FixedSelfID
+		}
+	}
+
 	conn, err := d.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		d.logger.Warn("websocket upgrade failed", "addr", remoteAddr, "error", err)
@@ -76,7 +92,7 @@ func (d *DataPlane) handleDownstreamWS(w http.ResponseWriter, r *http.Request) {
 		RemoteAddr:       remoteAddr,
 		UserAgent:        r.UserAgent(),
 		TokenFingerprint: hub.FingerprintToken(token),
-		Source:           "downstream_ws",
+		Source:           source,
 	}
 
 	if err := d.hub.HandleDownstream(r.Context(), info, peer); err != nil {

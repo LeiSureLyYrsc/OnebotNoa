@@ -210,9 +210,9 @@ docker pull ghcr.io/leisurelyyrsc/onebotnoa:latest
 - [x] I4 管理 REST（账号/Bot/绑定/监听）+ SSE 实时事件流 + WebUI 页面
 - [x] I5 账号级令牌桶、Bot 配额、策略黑白名单、背压、离线队列、/metrics
 - [x] I6 双向拨号（上游/下游）+ 指数退避重连 + 探活 + 拨号目标页
-- [ ] I7 元事件合成、本地应答、仪表盘、API 调试台
-- [ ] I8 HTTP 兼容层（HTTP API + 上报）
-- [ ] I9 动态监听端口/路径、TLS、部署产物
+- [x] I7 元事件合成、本地应答（get_*/can_*/hub_*）、API 调试台、日志与审计页
+- [x] I8 HTTP 兼容层（上游 HTTP 上报 + 下游 HTTP API + 显式未实现的 quick-operation）
+- [x] I9 独立监听端口运行时热重建、TLS、部署产物与文档
 
 ---
 

@@ -141,6 +141,11 @@ func runServe(args []string) error {
 	dialManager := transport.NewDialManager(cfg, st, relay, logger)
 	dialManager.Start(ctx, transport.LoadEndpointSpecs(ctx, cfg, st, logger))
 
+	// Dedicated listeners own their own address (and their own socket), so they
+	// can be created, changed or removed while the process keeps running.
+	listenerManager := transport.NewListenerManager(cfg, st, dataPlane, logger)
+	listenerManager.Start(ctx, transport.LoadListenerSpecs(ctx, cfg, st, logger))
+
 	startedAt := time.Now()
 	mux := transport.NewMux(transport.Options{Version: version, StartedAt: startedAt, Logger: logger})
 	dataPlane.Register(mux)
@@ -157,6 +162,7 @@ func runServe(args []string) error {
 		Metrics:   metricsCollector,
 		Policy:    policyEngine,
 		Dialer:    dialManager,
+		Listeners: listenerManager,
 		Version:   version,
 		StartedAt: startedAt,
 	}).Register(mux)
@@ -200,6 +206,7 @@ func runServe(args []string) error {
 	}
 
 	dialManager.Stop()
+	listenerManager.Stop()
 	dataPlane.CloseAll("server shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout.Std())

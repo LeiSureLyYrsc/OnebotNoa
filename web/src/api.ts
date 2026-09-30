@@ -81,6 +81,14 @@ export interface Binding {
   account_name: string;
 }
 
+export interface ListenerRuntimeState {
+  runtime?: string;
+  url?: string;
+  last_error?: string;
+  started_at?: string;
+  source?: string;
+}
+
 export interface Listener {
   id: number;
   name: string;
@@ -90,6 +98,10 @@ export interface Listener {
   fixed_self_id: string;
   enabled: boolean;
   runtime: string;
+  url?: string;
+  last_error?: string;
+  started_at?: string;
+  source?: string;
 }
 
 export interface RelayCounters {

@@ -31,6 +31,8 @@ export function ListenersPage() {
 
   useEffect(() => {
     void load();
+    const timer = window.setInterval(load, 4000);
+    return () => window.clearInterval(timer);
   }, [load]);
 
   async function submit(event: Event) {
@@ -110,6 +112,7 @@ export function ListenersPage() {
               <th>路径</th>
               <th>固定 self_id</th>
               <th>运行时</th>
+              <th>对外地址</th>
               <th />
             </tr>
           </thead>
@@ -121,7 +124,13 @@ export function ListenersPage() {
                 <td class="hub-mono">{listener.bind_addr}</td>
                 <td class="hub-mono">{listener.path}</td>
                 <td class="hub-mono">{listener.fixed_self_id || "—"}</td>
-                <td>{listener.runtime === "disabled" ? "已停用" : "待生效（I9）"}</td>
+                <td>
+                  <span class={"hub-dot hub-dot--" + runtimeDot(listener.runtime)} title={listener.last_error || ""}>
+                    {runtimeLabel(listener.runtime)}
+                  </span>
+                  {listener.last_error ? <div class="hub-error hub-error--inline">{listener.last_error}</div> : null}
+                </td>
+                <td class="hub-mono">{listener.url || "—"}</td>
                 <td class="hub-row">
                   <button onClick={() => void remove(listener)}>删除</button>
                 </td>
@@ -168,4 +177,36 @@ export function ListenersPage() {
       ) : null}
     </Window>
   );
+}
+
+function runtimeLabel(state?: string): string {
+  switch (state) {
+    case "listening":
+      return "监听中";
+    case "error":
+      return "启动失败";
+    case "stopped":
+      return "已停止";
+    case "disabled":
+      return "已停用";
+    case "pending":
+      return "待生效";
+    default:
+      return state || "未知";
+  }
+}
+
+function runtimeDot(state?: string): string {
+  switch (state) {
+    case "listening":
+      return "online";
+    case "error":
+      return "offline";
+    case "disabled":
+    case "stopped":
+    case "pending":
+      return "degraded";
+    default:
+      return "offline";
+  }
 }

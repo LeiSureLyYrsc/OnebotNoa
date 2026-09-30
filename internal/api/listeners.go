@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/transport"
 )
 
 // listenerRequest is the create/update payload for a dedicated listener.
@@ -59,10 +62,33 @@ func validateListener(req listenerRequest) (model.Listener, string) {
 	return l, ""
 }
 
-// listenerView adds the runtime state of a dedicated listener.
+// ListenerRuntime is the dedicated-listener manager the API drives.
+type ListenerRuntime interface {
+	States() []transport.ListenerState
+	Reload(ctx context.Context)
+}
+
+// listenerView is a stored listener row plus its live runtime state. The row is
+// the desired configuration; the extra fields say what is actually bound.
 type listenerView struct {
 	model.Listener
-	Runtime string `json:"runtime"`
+	Runtime   string `json:"runtime"`
+	URL       string `json:"url,omitempty"`
+	LastError string `json:"last_error,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+
+// runtimeStates indexes the manager's live state by listener name.
+func (s *Server) runtimeStates() map[string]transport.ListenerState {
+	index := map[string]transport.ListenerState{}
+	if s.opt.Listeners == nil {
+		return index
+	}
+	for _, state := range s.opt.Listeners.States() {
+		index[state.Name] = state
+	}
+	return index
 }
 
 func (s *Server) listenerViews(r *http.Request) ([]listenerView, error) {
@@ -70,15 +96,72 @@ func (s *Server) listenerViews(r *http.Request) ([]listenerView, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]listenerView, 0, len(rows))
+	states := s.runtimeStates()
+	out := make([]listenerView, 0, len(rows)+len(states))
+	seen := map[string]bool{}
 	for _, l := range rows {
-		state := "pending"
-		if !l.Enabled {
-			state = "disabled"
+		view := listenerView{Listener: l, Runtime: "pending"}
+		if state, ok := states[l.Name]; ok {
+			seen[l.Name] = true
+			view.Runtime = state.State
+			view.URL = state.URL
+			view.LastError = state.LastError
+			view.StartedAt = state.StartedAt
+			view.Source = state.Source
+		} else if !l.Enabled {
+			view.Runtime = "disabled"
 		}
-		out = append(out, listenerView{Listener: l, Runtime: state})
+		out = append(out, view)
 	}
+	// Listeners that only exist in config.yaml are part of the same picture.
+	for name, state := range states {
+		if seen[name] {
+			continue
+		}
+		out = append(out, listenerView{
+			Listener: model.Listener{
+				Name: name, Kind: state.Kind, BindAddr: state.Addr, Path: state.Path,
+				FixedSelfID: state.FixedSelfID, Enabled: state.Enabled,
+			},
+			Runtime: state.State, URL: state.URL, LastError: state.LastError,
+			StartedAt: state.StartedAt, Source: state.Source,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// viewFor returns the live view of one stored listener row.
+func (s *Server) viewFor(listener model.Listener) listenerView {
+	view := listenerView{Listener: listener, Runtime: "pending"}
+	if !listener.Enabled {
+		view.Runtime = "disabled"
+	}
+	if state, ok := s.runtimeStates()[listener.Name]; ok {
+		view.Runtime = state.State
+		view.URL = state.URL
+		view.LastError = state.LastError
+		view.StartedAt = state.StartedAt
+		view.Source = state.Source
+	}
+	return view
+}
+
+// dialerListenerViews reloads the list after a mutation (named for symmetry with
+// the endpoints API; the listener runtime is what actually changed).
+func (s *Server) dialerListenerViews(r *http.Request) []listenerView {
+	views, err := s.listenerViews(r)
+	if err != nil {
+		return []listenerView{}
+	}
+	return views
+}
+
+// reloadListeners hot-applies the desired listener set.
+func (s *Server) reloadListeners(ctx context.Context) {
+	if s.opt.Listeners != nil {
+		s.opt.Listeners.Reload(ctx)
+	}
 }
 
 func (s *Server) handleListListeners(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +177,7 @@ func (s *Server) handleListListeners(w http.ResponseWriter, r *http.Request) {
 			"downstream_path": s.opt.Config.OneBot.DownstreamWS.Path,
 			"listen":          s.opt.Config.Server.Listen,
 		},
-		"runtime_note": "独立监听端口的运行时启停随增量 I9 提供；此处先持久化配置",
+		"runtime_note": "source=config 的条目来自 config.yaml；运行时状态为实际绑定结果，端口被占用会在 last_error 中报告",
 	})
 }
 
@@ -119,8 +202,10 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, s.actor(r), "listener.create", created.BindAddr+created.Path, "")
+	s.reloadListeners(r.Context())
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"listener": listenerView{Listener: created, Runtime: "pending"},
+		"listener":  s.viewFor(created),
+		"listeners": s.dialerListenerViews(r),
 	})
 }
 
@@ -154,11 +239,11 @@ func (s *Server) handleUpdateListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, s.actor(r), "listener.update", updated.BindAddr+updated.Path, "")
-	state := "pending"
-	if !updated.Enabled {
-		state = "disabled"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"listener": listenerView{Listener: updated, Runtime: state}})
+	s.reloadListeners(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"listener":  s.viewFor(updated),
+		"listeners": s.dialerListenerViews(r),
+	})
 }
 
 func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
@@ -176,5 +261,6 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, s.actor(r), "listener.delete", listener.BindAddr+listener.Path, "")
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": listener.Name})
+	s.reloadListeners(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": listener.Name, "listeners": s.dialerListenerViews(r)})
 }

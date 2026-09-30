@@ -65,6 +65,7 @@ func (o *recordingObserver) framesFor(selfID string) []observedFrame {
 
 type upstreamEnv struct {
 	ts      *httptest.Server
+	dp      *DataPlane
 	hub     *hub.Hub
 	store   *store.Store
 	cfg     *config.Config
@@ -132,7 +133,7 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	})
 
 	return &upstreamEnv{
-		ts: ts, hub: relay, store: st, cfg: cfg, obs: obs,
+		ts: ts, dp: dp, hub: relay, store: st, cfg: cfg, obs: obs,
 		policy: policy, metrics: metrics, events: events,
 		ctx: envCtx,
 	}

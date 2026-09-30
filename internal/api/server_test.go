@@ -27,6 +27,7 @@ type testAPI struct {
 	st     *store.Store
 	hub    *hub.Hub
 	events *hub.EventLog
+	srv    *Server
 }
 
 func newTestAPI(t *testing.T) *testAPI {
@@ -83,6 +84,7 @@ func newTestAPIWith(t *testing.T, mutate func(*config.Config)) *testAPI {
 		st:     st,
 		hub:    relay,
 		events: events,
+		srv:    srv,
 	}
 }
 

@@ -78,7 +78,32 @@ endpoints: []
 #    bot_name: nonebot-main
 
 # 独立端口/路径监听（也可在 WebUI 动态增删，I9）。
+# 独立监听端口：给某个账号或某个 Bot 单独开一个地址。
+# 共享端点（上面的 upstream_ws / downstream_ws）用一条端口服务全部实例；
+# 独立端点用于物理隔离，并且可以在 WebUI 里增删改——运行时立即生效，不用重启。
+#
+# 上游独立监听必须指定账号（account_self_id 或 WebUI 里的 account_id），
+# 连接时仍然需要 token（该账号的 token 或 bootstrap_token）；带着有效 token
+# 但 self_id 不是该账号会被 403 拒绝。
+# 下游独立监听必须指定 Bot；可选的 fixed_self_id 让该端口只呈现一个账号，
+# 相当于把「透明单账号视图」固化到地址上。
 dedicated: []
+# dedicated:
+#   - name: qq-10001
+#     kind: upstream_listen
+#     addr: 127.0.0.1:6710
+#     path: /onebot/v11/ws
+#     account_self_id: "10001"
+#     enabled: true
+#   - name: bot-nonebot
+#     kind: downstream_listen
+#     addr: 127.0.0.1:6810
+#     path: /onebot/v11/bot/ws
+#     bot_name: nonebot2
+#     fixed_self_id: "10001"   # 可选：该端口只暴露这一个账号
+#     tls_cert: ""             # 同时提供 cert 与 key 即启用 TLS（wss）
+#     tls_key: ""
+#     enabled: true
 #  - name: qq-10001
 #    kind: upstream_listen
 #    addr: 0.0.0.0:6710
