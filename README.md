@@ -1,5 +1,9 @@
 # OnebotNoa
 
+[![CI](https://github.com/LeiSureLyYrsc/OnebotNoa/actions/workflows/ci.yml/badge.svg)](https://github.com/LeiSureLyYrsc/OnebotNoa/actions/workflows/ci.yml)
+[![Release](https://github.com/LeiSureLyYrsc/OnebotNoa/actions/workflows/release.yml/badge.svg)](https://github.com/LeiSureLyYrsc/OnebotNoa/actions/workflows/release.yml)
+[![Container](https://img.shields.io/badge/image-ghcr.io%2Fleisurelyyrsc%2Fonebotnoa-blue)](https://github.com/LeiSureLyYrsc/OnebotNoa/pkgs/container/onebotnoa)
+
 **OneBot V11 中继管理端** —— 单二进制、内置 WebUI（Windows XP 风格）。
 
 让**一个 QQ 号同时服务多个 Bot**，也让**多个 QQ 实例共用一个接入地址**；鉴权、按 Bot 分配账号、账号级风控限速与在线调试都在这一层完成。
