@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go vet and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test (race)
+        run: go test -race ./...
+
+  web:
+    name: WebUI build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci --no-fund --no-audit
+      - name: Type-check and build
+        working-directory: web
+        run: npm run build
+
+  binary:
+    name: Single binary (web embedded)
+    runs-on: ubuntu-latest
+    needs: [go, web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build WebUI into the embed directory
+        working-directory: web
+        run: npm ci --no-fund --no-audit && npm run build
+      - name: Build the binary
+        run: CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=ci" -o bin/onebotnoa ./cmd/onebotnoa
+      - name: Smoke test
+        run: |
+          ./bin/onebotnoa version
+          ONEBOTNOA_LISTEN=127.0.0.1:18080 ONEBOTNOA_SQLITE=./bin/ci.db ./bin/onebotnoa serve -config /nonexistent.yaml &
+          sleep 2
+          curl -fsS http://127.0.0.1:18080/healthz
+          curl -fsS http://127.0.0.1:18080/ | head -5
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    needs: [go, web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: onebotnoa:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run the image and probe /healthz
+        run: |
+          docker run -d --name onebotnoa-ci -p 18081:8080 onebotnoa:ci
+          for i in $(seq 1 15); do
+            if curl -fsS http://127.0.0.1:18081/healthz; then break; fi
+            sleep 1
+          done
+          docker logs onebotnoa-ci | head -20
+          curl -fsS http://127.0.0.1:18081/healthz

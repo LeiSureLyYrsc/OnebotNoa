@@ -1,0 +1,23 @@
+# build & local caches
+.cache/
+bin/
+node_modules/
+web/dist/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+
+# runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# local secrets/config
+config.yaml
+*.local.yaml
+
+# editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

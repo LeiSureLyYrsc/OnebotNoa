@@ -1,0 +1,26 @@
+[Unit]
+Description=OnebotNoa - OneBot V11 relay hub
+Documentation=https://github.com/LeiSureLyYrsc/OnebotNoa
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=onebotnoa
+Group=onebotnoa
+WorkingDirectory=/var/lib/onebotnoa
+ExecStart=/usr/local/bin/onebotnoa serve -config /etc/onebotnoa/config.yaml
+Restart=on-failure
+RestartSec=3
+# The default config listens on 127.0.0.1; drop that line or bind 0.0.0.0 to
+# expose the data plane to other hosts.
+Environment=ONEBOTNOA_SQLITE=/var/lib/onebotnoa/onebotnoa.db
+StateDirectory=onebotnoa
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/onebotnoa
+
+[Install]
+WantedBy=multi-user.target

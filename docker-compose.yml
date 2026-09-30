@@ -1,0 +1,50 @@
+# OnebotNoa — OneBot V11 relay hub.
+#
+#   docker compose up -d          # uses the prebuilt image from GHCR
+#   docker compose up -d --build  # builds from this checkout instead
+#
+# The first start generates a random administrator password and prints it to the
+# container log:
+#   docker compose logs onebotnoa | grep -i password
+
+services:
+  onebotnoa:
+    image: ghcr.io/leisurelyyrsc/onebotnoa:latest
+    build:
+      context: .
+      args:
+        VERSION: ${ONEBOTNOA_VERSION:-dev}
+    container_name: onebotnoa
+    restart: unless-stopped
+
+    # Management UI/REST, the QQ-side endpoint (/onebot/v11/ws) and the Bot-side
+    # endpoint (/onebot/v11/bot/ws) all share this port. Point your OneBot
+    # implementation and your Bot framework at the same host:port.
+    ports:
+      - "${ONEBOTNOA_BIND:-127.0.0.1}:8080:8080"
+
+    volumes:
+      # SQLite database plus an optional config.yaml (config.yaml is created by you).
+      - ./data:/data
+
+    environment:
+      ONEBOTNOA_LISTEN: 0.0.0.0:8080
+      ONEBOTNOA_SQLITE: /data/onebotnoa.db
+      ONEBOTNOA_LOG_LEVEL: info
+      ONEBOTNOA_LOG_FORMAT: json
+      # Set this on the very first start to choose the admin password yourself;
+      # leave it unset to have one generated and logged.
+      # ONEBOTNOA_ADMIN_PASSWORD: "change-me-please"
+      # Enable when running behind a reverse proxy you control.
+      # ONEBOTNOA_TRUST_PROXY: "true"
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+    # Uncomment when the hub must reach QQ implementations or Bots on the host.
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"

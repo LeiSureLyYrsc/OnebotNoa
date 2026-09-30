@@ -1,0 +1,4 @@
+# Vite writes the built WebUI into this directory (see web/vite.config.ts and
+# scripts/build-web.ps1, which cleans everything except this file).
+# Only this placeholder is tracked so that go:embed can compile before the
+# frontend has ever been built.

@@ -1,0 +1,19 @@
+# Never ship local build state or secrets into the image context.
+.cache/
+bin/
+data/
+node_modules/
+**/node_modules/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+.git/
+.github/
+.vscode/
+.idea/
+*.db
+*.db-wal
+*.db-shm
+config.yaml
+*.local.yaml
+web/dist/
+docs/

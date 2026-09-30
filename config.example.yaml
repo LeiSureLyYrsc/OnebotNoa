@@ -1,0 +1,82 @@
+# OnebotNoa 配置样例。复制为 config.yaml 后修改（config.yaml 已在 .gitignore 中）。
+# 动态实体（QQ 实例 / Bot / 绑定 / 监听端口）在 WebUI 里管理并存于 SQLite；
+# 这里只放进程级静态配置与出站密钥。
+
+server:
+  listen: 127.0.0.1:8080          # 默认只监听本机；公网部署请置于反代之后
+  tls_cert: ""                    # 与 tls_key 同时设置才启用 HTTPS
+  tls_key: ""
+  admin_bootstrap_password: ""    # 留空则首次启动生成随机密码并打印到控制台
+  trust_proxy: false              # 置于反代之后时置 true 以信任 X-Forwarded-*
+  read_header_timeout: 10s
+  shutdown_timeout: 8s
+
+onebot:
+  upstream_ws:                    # QQ 侧（OneBot 实现端）接入：单端点多实例
+    enable: true
+    path: /onebot/v11/ws
+    require_token: true
+    allow_query_token: true
+    bootstrap_token: ""          # 首次接入用的共享令牌（留空则只认账号级 token），建议逐个实例绑定独立 token
+    unknown_account_policy: pending   # pending | reject | auto
+    identity_timeout: 3s              # 首帧兜底识别窗口
+  downstream_ws:                  # Bot 侧（OneBot 应用端）接入
+    enable: true
+    path: /onebot/v11/bot/ws
+    require_token: true
+  http:                           # OneBot HTTP 兼容层
+    enable: true
+    api_path: /onebot/v11/http
+    report_path: /onebot/v11/report
+    quick_operation: false        # 多 Bot 下语义含混，默认关闭
+    max_body_bytes: 4194304
+
+policy:
+  action_timeout: 15s             # 动作端到端超时
+  stream_idle_timeout: 60s        # 流式动作空闲超时（每帧刷新）
+  stream_max_timeout: 10m         # 流式动作硬上限
+  offline_action_policy: fail_fast    # fail_fast | queue
+  queue: { size: 256, ttl: 10s }
+  bot_backpressure: drop_oldest   # drop_oldest | drop_newest | disconnect | block
+  write_queue_size: 1024
+  meta_events: synthetic          # synthetic | passthrough | drop
+  heartbeat_interval: 5s
+  per_account_rate: { rate: 1, burst: 5 }          # 账号级全局令牌桶（防风控）
+  per_bot_rate: { rate: 5, burst: 10, concurrency: 4 }
+  pending_per_conn: 512
+  pending_global: 8192
+  ping_interval: 30s
+  pong_timeout: 10s
+
+storage:
+  sqlite: ./data/onebotnoa.db
+  event_ring: 2000
+  session_ttl: 168h
+
+log:
+  level: info                     # debug | info | warn | error
+  format: json                    # json | text
+  add_source: false
+
+# 中继主动拨号的目标（可选，I6 实现）。token 只在此处配置，不入库。
+endpoints: []
+#  - name: qq-10002
+#    kind: upstream_dial          # upstream_dial | downstream_dial
+#    url: ws://10.0.0.5:6700/
+#    mode: universal              # universal | split
+#    token: ""
+#    account_hint: "10002"
+#    reconnect: { min: 1s, max: 60s, jitter: 0.3 }
+#  - name: bot-nonebot
+#    kind: downstream_dial
+#    url: ws://10.0.0.9:8080/onebot/v11/ws
+#    token: ""
+#    bot_name: nonebot-main
+
+# 独立端口/路径监听（也可在 WebUI 动态增删，I9）。
+dedicated: []
+#  - name: qq-10001
+#    kind: upstream_listen
+#    addr: 0.0.0.0:6710
+#    path: /onebot/v11/ws
+#    account_self_id: "10001"
