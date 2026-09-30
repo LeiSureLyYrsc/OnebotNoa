@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
@@ -30,6 +32,8 @@ type Options struct {
 	Auth      *auth.Manager
 	Logger    *slog.Logger
 	Config    *config.Config
+	Hub       *hub.Hub
+	Events    *hub.EventLog
 	Version   string
 	StartedAt time.Time
 }
@@ -59,7 +63,44 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.requireAuth(s.handleLogout))
 	mux.HandleFunc("GET /api/v1/auth/me", s.requireAuth(s.handleMe))
+
 	mux.HandleFunc("GET /api/v1/system/status", s.requireAuth(s.handleSystemStatus))
+
+	// QQ instances (accounts)
+	mux.HandleFunc("GET /api/v1/accounts", s.requireAuth(s.handleListAccounts))
+	mux.HandleFunc("POST /api/v1/accounts", s.requireAuth(s.handleCreateAccount))
+	mux.HandleFunc("GET /api/v1/accounts/pending", s.requireAuth(s.handleListPending))
+	mux.HandleFunc("POST /api/v1/accounts/pending/approve", s.requireAuth(s.handleApprovePending))
+	mux.HandleFunc("POST /api/v1/accounts/pending/reject", s.requireAuth(s.handleRejectPending))
+	mux.HandleFunc("GET /api/v1/accounts/{id}", s.requireAuth(s.handleGetAccount))
+	mux.HandleFunc("PATCH /api/v1/accounts/{id}", s.requireAuth(s.handleUpdateAccount))
+	mux.HandleFunc("DELETE /api/v1/accounts/{id}", s.requireAuth(s.handleDeleteAccount))
+	mux.HandleFunc("POST /api/v1/accounts/{id}/token", s.requireAuth(s.handleRotateAccountToken))
+	mux.HandleFunc("DELETE /api/v1/accounts/{id}/token", s.requireAuth(s.handleClearAccountToken))
+
+	// Bot applications
+	mux.HandleFunc("GET /api/v1/bots", s.requireAuth(s.handleListBots))
+	mux.HandleFunc("POST /api/v1/bots", s.requireAuth(s.handleCreateBot))
+	mux.HandleFunc("GET /api/v1/bots/{id}", s.requireAuth(s.handleGetBot))
+	mux.HandleFunc("PATCH /api/v1/bots/{id}", s.requireAuth(s.handleUpdateBot))
+	mux.HandleFunc("DELETE /api/v1/bots/{id}", s.requireAuth(s.handleDeleteBot))
+	mux.HandleFunc("POST /api/v1/bots/{id}/token/rotate", s.requireAuth(s.handleRotateBotToken))
+
+	// Bindings (which Bot may use which account)
+	mux.HandleFunc("GET /api/v1/bindings", s.requireAuth(s.handleListBindings))
+	mux.HandleFunc("POST /api/v1/bindings", s.requireAuth(s.handleCreateBinding))
+	mux.HandleFunc("PATCH /api/v1/bindings/{id}", s.requireAuth(s.handleUpdateBinding))
+	mux.HandleFunc("DELETE /api/v1/bindings/{id}", s.requireAuth(s.handleDeleteBinding))
+
+	// Dedicated listeners (runtime hot-reload arrives in I9)
+	mux.HandleFunc("GET /api/v1/listeners", s.requireAuth(s.handleListListeners))
+	mux.HandleFunc("POST /api/v1/listeners", s.requireAuth(s.handleCreateListener))
+	mux.HandleFunc("PATCH /api/v1/listeners/{id}", s.requireAuth(s.handleUpdateListener))
+	mux.HandleFunc("DELETE /api/v1/listeners/{id}", s.requireAuth(s.handleDeleteListener))
+
+	// Live activity
+	mux.HandleFunc("GET /api/v1/events/recent", s.requireAuth(s.handleRecentEvents))
+	mux.HandleFunc("GET /api/v1/events/stream", s.requireAuth(s.handleEventStream))
 }
 
 // ---------------------------------------------------------------- middleware
@@ -143,6 +184,32 @@ func decodeJSON(r *http.Request, dst any) error {
 		return err
 	}
 	return nil
+}
+
+// jsonKindProblem validates an optional JSON column. kind is "object" or
+// "array"; an empty raw value means "leave unchanged".
+func jsonKindProblem(raw json.RawMessage, kind string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if !json.Valid(raw) {
+		return "不是合法的 JSON"
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	switch kind {
+	case "object":
+		if trimmed[0] != '{' {
+			return "必须是 JSON 对象"
+		}
+	case "array":
+		if trimmed[0] != '[' {
+			return "必须是 JSON 数组"
+		}
+	}
+	return ""
 }
 
 // ------------------------------------------------------------- cookies / ips

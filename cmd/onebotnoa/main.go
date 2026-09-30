@@ -111,6 +111,11 @@ func runServe(args []string) error {
 	go runSessionCleanup(ctx, authManager, logger)
 
 	relay := hub.New(cfg, st, logger)
+	// One ring feeds the WebUI live view (SSE) and the dashboard counters.
+	eventLog := hub.NewEventLog(cfg.Storage.EventRing)
+	relay.SetObserver(eventLog)
+	relay.Actions().SetTrafficObserver(eventLog)
+
 	dataPlane := transport.NewDataPlane(cfg, st, relay, logger)
 
 	startedAt := time.Now()
@@ -121,6 +126,8 @@ func runServe(args []string) error {
 		Auth:      authManager,
 		Logger:    logger,
 		Config:    cfg,
+		Hub:       relay,
+		Events:    eventLog,
 		Version:   version,
 		StartedAt: startedAt,
 	}).Register(mux)

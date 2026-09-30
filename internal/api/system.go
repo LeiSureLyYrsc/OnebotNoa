@@ -28,7 +28,7 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		sessionTTL = s.opt.Config.Storage.SessionTTL.Std()
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"version":       s.opt.Version,
 		"uptime_sec":    int(time.Since(s.opt.StartedAt).Seconds()),
 		"started_at":    s.opt.StartedAt,
@@ -37,5 +37,27 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		"users":         userCount,
 		"audit_entries": auditCount,
 		"session_ttl":   sessionTTL.String(),
-	})
+	}
+
+	if s.opt.Hub != nil {
+		st := s.opt.Hub.Status()
+		payload["relay"] = map[string]any{
+			"accounts":          st.Accounts,
+			"online":            st.Online,
+			"degraded":          st.Degraded,
+			"offline":           st.Offline,
+			"upstream_conns":    st.UpstreamConns,
+			"downstream_conns":  st.DownstreamConns,
+			"pending_accounts":  st.PendingAccounts,
+			"pending_actions":   st.PendingActions,
+		}
+	}
+	if s.opt.Events != nil {
+		payload["events"] = map[string]any{
+			"ring_size":   s.opt.Events.Len(),
+			"subscribers": s.opt.Events.Subscribers(),
+			"dropped":     s.opt.Events.Dropped(),
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }

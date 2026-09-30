@@ -1,22 +1,44 @@
 import { useEffect, useState } from "preact/hooks";
-import { ApiError, getHealth, type HealthStatus } from "./api";
+import { ApiError, me, logout } from "./api";
+import { useAppState, setState, go, type PageId } from "./state";
+import { SecretDialog, Toast } from "./ui";
+import { LoginPage } from "./pages/login";
+import { DashboardPage } from "./pages/dashboard";
+import { AccountsPage } from "./pages/accounts";
+import { BotsPage } from "./pages/bots";
+import { BindingsPage } from "./pages/bindings";
+import { EventsPage } from "./pages/events";
+import { ListenersPage } from "./pages/listeners";
 
-type Loadable<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "error"; message: string };
+const NAV: Array<{ id: PageId; label: string }> = [
+  { id: "dashboard", label: "仪表盘" },
+  { id: "accounts", label: "QQ 实例" },
+  { id: "bots", label: "Bot 实例" },
+  { id: "bindings", label: "绑定关系" },
+  { id: "events", label: "实时事件" },
+  { id: "listeners", label: "监听端点" },
+];
 
 export function App() {
-  const [health, setHealth] = useState<Loadable<HealthStatus>>({ state: "loading" });
+  const app = useAppState();
+  const [menuOpen, setMenuOpen] = useState(false);
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
     let cancelled = false;
-    getHealth()
-      .then((value) => {
-        if (!cancelled) setHealth({ state: "ready", value });
+    me()
+      .then((result) => {
+        if (!cancelled) setState({ user: result.user, booting: false });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        const message = err instanceof ApiError ? err.message : String(err);
-        setHealth({ state: "error", message });
+        // 401 simply means "not logged in yet"; anything else is worth showing.
+        const unauthorized = err instanceof ApiError && err.status === 401;
+        setState({
+          user: null,
+          booting: false,
+          toast: unauthorized ? null : { text: err instanceof ApiError ? err.message : String(err), kind: "error" },
+        });
       });
     return () => {
       cancelled = true;
@@ -28,87 +50,96 @@ export function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  if (app.booting) {
+    return (
+      <div class="hub-desktop hub-desktop--surface">
+        <div class="hub-center hub-muted">正在连接服务端…</div>
+      </div>
+    );
+  }
+
+  if (!app.user) {
+    return (
+      <>
+        <LoginPage />
+        <Toast />
+      </>
+    );
+  }
+
   return (
     <div class="hub-desktop">
-      <div class="hub-workarea">
-        <div class="window hub-window">
-          <div class="title-bar">
-            <div class="title-bar-text">OnebotNoa — 中继管理端</div>
-            <div class="title-bar-controls">
-              <button aria-label="Minimize" />
-              <button aria-label="Maximize" />
-              <button aria-label="Close" />
-            </div>
-          </div>
-          <div class="window-body">
-            <p>
-              后端骨架已就绪（I0）。QQ 实例 / Bot 实例 / 绑定关系 / 实时事件流等页面按增量逐步接入。
-            </p>
-            <table class="hub-kv">
-              <tbody>
-                <tr>
-                  <th>服务状态</th>
-                  <td>{renderHealth(health)}</td>
-                </tr>
-                <tr>
-                  <th>数据面端点</th>
-                  <td>
-                    <span class="hub-code">/onebot/v11/ws</span>（QQ 侧接入，单端点多实例） ·{" "}
-                    <span class="hub-code">/onebot/v11/bot/ws</span>（Bot 侧接入）
-                  </td>
-                </tr>
-                <tr>
-                  <th>管理 API</th>
-                  <td>
-                    <span class="hub-code">/api/v1</span>（I1 起提供登录与资源接口）
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="status-bar">
-            <p class="status-bar-field">就绪</p>
-            <p class="status-bar-field">OneBot V11</p>
-            <p class="status-bar-field">单二进制</p>
-          </div>
-        </div>
+      <div class="hub-menubar">
+        {NAV.map((item) => (
+          <button
+            key={item.id}
+            class={app.page === item.id ? "hub-menubar-item hub-menubar-item--active" : "hub-menubar-item"}
+            onClick={() => go(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+        <span class="hub-spacer" />
+        <span class="hub-muted">已登录：{app.user.username}</span>
+        <button
+          class="hub-menubar-item"
+          onClick={async () => {
+            await logout();
+            setState({ user: null });
+          }}
+        >
+          退出
+        </button>
       </div>
 
+      <div class="hub-workarea hub-workarea--pages">{renderPage(app.page)}</div>
+
       <div class="hub-taskbar">
-        <div class="hub-start">⊞ 开始</div>
+        <div class="hub-start" onClick={() => setMenuOpen(!menuOpen)}>
+          ⊞ 开始
+        </div>
+        {menuOpen ? (
+          <div class="hub-startmenu" onMouseLeave={() => setMenuOpen(false)}>
+            <div class="hub-startmenu-header">OnebotNoa</div>
+            {NAV.map((item) => (
+              <button
+                key={item.id}
+                class="hub-startmenu-item"
+                onClick={() => {
+                  go(item.id);
+                  setMenuOpen(false);
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div class="hub-tray">
           <span class="hub-muted">OnebotNoa</span>
           <span class="hub-clock">{now.toLocaleTimeString("zh-CN", { hour12: false })}</span>
         </div>
       </div>
+
+      <SecretDialog />
+      <Toast />
     </div>
   );
 }
 
-function renderHealth(health: Loadable<HealthStatus>) {
-  switch (health.state) {
-    case "loading":
-      return <span class="hub-muted">检测中…</span>;
-    case "error":
-      return <span class="hub-error">不可用：{health.message}</span>;
-    case "ready":
-      return (
-        <span>
-          正常 · 版本 <span class="hub-code">{health.value.version}</span> · 运行{" "}
-          {formatUptime(health.value.uptime_sec)}
-        </span>
-      );
+function renderPage(page: PageId) {
+  switch (page) {
+    case "accounts":
+      return <AccountsPage />;
+    case "bots":
+      return <BotsPage />;
+    case "bindings":
+      return <BindingsPage />;
+    case "events":
+      return <EventsPage />;
+    case "listeners":
+      return <ListenersPage />;
+    default:
+      return <DashboardPage />;
   }
-}
-
-function formatUptime(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.floor(totalSeconds));
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const rest = seconds % 60;
-  if (days > 0) return days + " 天 " + hours + " 小时";
-  if (hours > 0) return hours + " 小时 " + minutes + " 分";
-  if (minutes > 0) return minutes + " 分 " + rest + " 秒";
-  return rest + " 秒";
 }

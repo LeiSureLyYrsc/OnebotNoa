@@ -122,5 +122,16 @@ func (h *Hub) InvalidateBindings() {
 	h.bindingMu.Unlock()
 }
 
+// RefreshBindings invalidates the cache and reloads the grants of every live Bot
+// connection, so a management change takes effect immediately.
+func (h *Hub) RefreshBindings(ctx context.Context) {
+	h.InvalidateBindings()
+	for _, conn := range h.AllDownstreams() {
+		if err := conn.ReloadBindings(ctx); err != nil {
+			h.logger.Warn("could not reload bot bindings", "bot", conn.Bot().Name, "error", err)
+		}
+	}
+}
+
 // bindingCacheTTL bounds staleness if a binding is changed outside the API.
 const bindingCacheTTL = 30 * time.Second

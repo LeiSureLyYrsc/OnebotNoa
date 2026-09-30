@@ -25,6 +25,14 @@ type PreSendHook interface {
 	Allow(selfID, action string, bindingScope Scope) (retcode int, wording string, allowed bool)
 }
 
+// TrafficObserver receives the action traffic the relay carries, for the live
+// view (hub.EventLog implements it).
+type TrafficObserver interface {
+	BotAction(bot, selfID string, raw []byte)
+	BotResponse(bot string, raw []byte)
+	PolicyRejected(bot, action string, retcode int, reason string)
+}
+
 // ActionRouter implements the action half of the relay: it resolves the target
 // account, rewrites echo values so concurrent Bots never collide, correlates
 // replies (including multi-frame streaming replies) and enforces timeouts.
@@ -38,6 +46,7 @@ type ActionRouter struct {
 
 	local   LocalActionHandler
 	preSend PreSendHook
+	traffic TrafficObserver
 }
 
 // NewActionRouter builds the router and its pending table.
@@ -60,6 +69,9 @@ func (r *ActionRouter) SetLocalHandler(h LocalActionHandler) { r.local = h }
 
 // SetPreSend installs the policy/rate-limit hook.
 func (r *ActionRouter) SetPreSend(h PreSendHook) { r.preSend = h }
+
+// SetTrafficObserver installs the live-view/metering hook.
+func (r *ActionRouter) SetTrafficObserver(o TrafficObserver) { r.traffic = o }
 
 // PendingCount reports in-flight actions (metrics).
 func (r *ActionRouter) PendingCount() int { return r.pending.Count() }
@@ -111,6 +123,7 @@ func (r *ActionRouter) HandleAction(ctx context.Context, conn *DownstreamConn, r
 	pa := &pendingAction{
 		conn:      conn.peer,
 		botID:     conn.Bot().ID,
+		botName:   conn.Bot().Name,
 		selfID:    selfID,
 		origEcho:  frame.Echo,
 		hasEcho:   len(frame.Echo) > 0,
@@ -127,6 +140,9 @@ func (r *ActionRouter) HandleAction(ctx context.Context, conn *DownstreamConn, r
 		return
 	}
 
+	if r.traffic != nil {
+		r.traffic.BotAction(conn.Bot().Name, selfID, upstreamFrame)
+	}
 	r.logger.Debug("action forwarded", "bot", conn.Bot().Name, "account", selfID,
 		"action", frame.Action, "echo", key)
 }
@@ -164,11 +180,17 @@ func (r *ActionRouter) HandleResponse(raw []byte) {
 			r.logger.Warn("stream exceeded its maximum duration", "echo", key)
 			r.finish(key)
 		}
+		if r.traffic != nil {
+			r.traffic.BotResponse(pa.botName, out)
+		}
 		pa.conn.Send(out)
 		return
 	}
 
 	r.finish(key)
+	if r.traffic != nil {
+		r.traffic.BotResponse(pa.botName, out)
+	}
 	pa.conn.Send(out)
 }
 
@@ -192,7 +214,11 @@ func (r *ActionRouter) onTimeout(pa *pendingAction) {
 	if pa.streaming {
 		wording = "上游流式响应中断"
 	}
-	if pa.conn.Send(onebot.FailureResponse(echo, onebot.RetImplError, wording)) {
+	reply := onebot.FailureResponse(echo, onebot.RetImplError, wording)
+	if r.traffic != nil {
+		r.traffic.BotResponse(pa.botName, reply)
+	}
+	if pa.conn.Send(reply) {
 		r.logger.Warn("action timed out", "account", pa.selfID, "conn", pa.conn.ID(), "streaming", pa.streaming)
 	}
 }
@@ -203,6 +229,9 @@ func (r *ActionRouter) reject(conn *DownstreamConn, frame onebot.ActionFrame, re
 		echo = frame.Echo
 	}
 	conn.Send(onebot.FailureResponse(echo, retcode, wording))
+	if r.traffic != nil {
+		r.traffic.PolicyRejected(conn.Bot().Name, frame.Action, retcode, wording)
+	}
 	conn.hub.audit(context.Background(), "hub", "action.rejected", conn.Bot().Name,
 		frame.Action+" -> "+wording)
 	r.logger.Info("action rejected", "bot", conn.Bot().Name, "action", frame.Action,

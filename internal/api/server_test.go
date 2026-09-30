@@ -15,15 +15,18 @@ import (
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
 
 const testPassword = "correct-horse-battery"
 
 type testAPI struct {
-	ts   *httptest.Server
-	http *http.Client
-	st   *store.Store
+	ts     *httptest.Server
+	http   *http.Client
+	st     *store.Store
+	hub    *hub.Hub
+	events *hub.EventLog
 }
 
 func newTestAPI(t *testing.T) *testAPI {
@@ -55,8 +58,13 @@ func newTestAPIWith(t *testing.T, mutate func(*config.Config)) *testAPI {
 	if mutate != nil {
 		mutate(cfg)
 	}
+	relay := hub.New(cfg, st, logger)
+	events := hub.NewEventLog(64)
+	relay.SetObserver(events)
+	relay.Actions().SetTrafficObserver(events)
 	srv := New(Options{
 		Store: st, Auth: manager, Logger: logger, Config: cfg,
+		Hub: relay, Events: events,
 		Version: "test-version", StartedAt: time.Now().Add(-time.Minute),
 	})
 	mux := http.NewServeMux()
@@ -69,7 +77,13 @@ func newTestAPIWith(t *testing.T, mutate func(*config.Config)) *testAPI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &testAPI{ts: ts, http: &http.Client{Jar: jar, Timeout: 5 * time.Second}, st: st}
+	return &testAPI{
+		ts:     ts,
+		http:   &http.Client{Jar: jar, Timeout: 5 * time.Second},
+		st:     st,
+		hub:    relay,
+		events: events,
+	}
 }
 
 func (a *testAPI) do(t *testing.T, method, path, body string, headers map[string]string) (*http.Response, map[string]any) {

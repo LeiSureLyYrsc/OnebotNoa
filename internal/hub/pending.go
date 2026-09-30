@@ -16,6 +16,7 @@ var ErrPendingLimit = errors.New("hub: too many actions in flight")
 type pendingAction struct {
 	conn      Peer
 	botID     int64
+	botName   string
 	selfID    string
 	origEcho  json.RawMessage
 	hasEcho   bool
