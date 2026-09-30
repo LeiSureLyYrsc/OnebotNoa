@@ -61,6 +61,7 @@ type PeerOptions struct {
 	TokenFingerprint string
 	QueueSize        int
 	Backpressure     string
+	BlockTimeout     time.Duration
 	PingInterval     time.Duration
 	PongTimeout      time.Duration
 	WriteTimeout     time.Duration
@@ -73,13 +74,12 @@ type wsPeer struct {
 	conn   *websocket.Conn
 	logger *slog.Logger
 
-	send    chan []byte
+	queue   *sendQueue
 	done    chan struct{}
 	closeFn sync.Once
 	writeMu sync.Mutex // gorilla allows one writer; ReadMessage owns reads
 
-	dropped atomic.Int64
-	sent    atomic.Int64
+	sent atomic.Int64
 
 	// identityMu guards selfID: it is empty until the first frame reveals it and
 	// it is read from the routing goroutines.
@@ -118,10 +118,15 @@ func NewWSPeer(conn *websocket.Conn, opt PeerOptions, logger *slog.Logger) *wsPe
 		opt:    opt,
 		conn:   conn,
 		logger: logger.With("conn", opt.ID, "kind", opt.Kind, "role", string(opt.Role)),
-		send:   make(chan []byte, opt.QueueSize),
 		done:   make(chan struct{}),
 		selfID: opt.SelfID,
 	}
+	// "disconnect" is the only policy that must act on overflow: a permanently
+	// slow consumer loses its connection instead of silently dropping forever.
+	p.queue = newSendQueue(opt.QueueSize, opt.Backpressure, opt.BlockTimeout, func() {
+		p.logger.Warn("outbound queue overflowed, disconnecting the slow consumer")
+		p.Close(websocket.CloseTryAgainLater, "slow consumer")
+	})
 
 	conn.SetReadLimit(opt.MaxFrameBytes)
 	conn.SetPongHandler(func(string) error {
@@ -134,19 +139,21 @@ func NewWSPeer(conn *websocket.Conn, opt PeerOptions, logger *slog.Logger) *wsPe
 func (p *wsPeer) ID() string               { return p.opt.ID }
 func (p *wsPeer) Kind() string             { return p.opt.Kind }
 func (p *wsPeer) Role() onebot.Role        { return p.opt.Role }
+func (p *wsPeer) RemoteAddr() string       { return p.opt.RemoteAddr }
+func (p *wsPeer) UserAgent() string        { return p.opt.UserAgent }
+func (p *wsPeer) TokenFingerprint() string { return p.opt.TokenFingerprint }
+func (p *wsPeer) Done() <-chan struct{}    { return p.done }
+func (p *wsPeer) Dropped() int64           { return p.queue.Dropped() }
+func (p *wsPeer) Sent() int64              { return p.sent.Load() }
+func (p *wsPeer) Queued() int64            { return int64(p.queue.Len()) }
+
+// SelfID returns the account this connection belongs to (filled in later when
+// the identity only arrives with the first frame).
 func (p *wsPeer) SelfID() string {
 	p.identityMu.RLock()
 	defer p.identityMu.RUnlock()
 	return p.selfID
 }
-func (p *wsPeer) RemoteAddr() string       { return p.opt.RemoteAddr }
-func (p *wsPeer) UserAgent() string        { return p.opt.UserAgent }
-func (p *wsPeer) TokenFingerprint() string { return p.opt.TokenFingerprint }
-func (p *wsPeer) Done() <-chan struct{}    { return p.done }
-func (p *wsPeer) Dropped() int64           { return p.dropped.Load() }
-func (p *wsPeer) Sent() int64              { return p.sent.Load() }
-
-func (p *wsPeer) Queued() int64 { return int64(len(p.send)) }
 
 // Label identifies a connection in logs and in the WebUI.
 func (p *wsPeer) Label() string {
@@ -202,56 +209,7 @@ func (p *wsPeer) Send(raw []byte) bool {
 		return false
 	default:
 	}
-
-	switch p.opt.Backpressure {
-	case "drop_newest":
-		select {
-		case p.send <- raw:
-			return true
-		default:
-			p.dropped.Add(1)
-			return false
-		}
-	case "disconnect":
-		select {
-		case p.send <- raw:
-			return true
-		default:
-			p.dropped.Add(1)
-			p.Close(websocket.CloseTryAgainLater, "slow consumer")
-			return false
-		}
-	case "block":
-		timer := time.NewTimer(5 * time.Second)
-		defer timer.Stop()
-		select {
-		case p.send <- raw:
-			return true
-		case <-timer.C:
-			p.dropped.Add(1)
-			return false
-		case <-p.done:
-			return false
-		}
-	default: // drop_oldest
-		select {
-		case p.send <- raw:
-			return true
-		default:
-		}
-		select {
-		case <-p.send:
-			p.dropped.Add(1)
-		default:
-		}
-		select {
-		case p.send <- raw:
-			return true
-		default:
-			p.dropped.Add(1)
-			return false
-		}
-	}
+	return p.queue.Push(raw)
 }
 
 // WriteLoop drains the send queue and keeps the connection warm with pings. It
@@ -264,8 +222,11 @@ func (p *wsPeer) WriteLoop() {
 		select {
 		case <-p.done:
 			return
-		case msg := <-p.send:
-			if err := p.write(websocket.TextMessage, msg); err != nil {
+		case frame, ok := <-p.queue.C():
+			if !ok {
+				return
+			}
+			if err := p.write(websocket.TextMessage, frame); err != nil {
 				p.logger.Debug("write failed", "error", err)
 				p.Close(websocket.CloseInternalServerErr, "write failed")
 				return
@@ -294,6 +255,7 @@ func (p *wsPeer) write(messageType int, payload []byte) error {
 func (p *wsPeer) Close(code int, reason string) {
 	p.closeFn.Do(func() {
 		close(p.done)
+		p.queue.Close()
 		p.writeMu.Lock()
 		_ = p.conn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(code, reason), time.Now().Add(2*time.Second))

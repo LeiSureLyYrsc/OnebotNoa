@@ -22,6 +22,9 @@ type pendingAction struct {
 	hasEcho   bool
 	createdAt time.Time
 	timer     *time.Timer
+	// release returns the rate-limit/concurrency slot; it runs exactly once when
+	// the entry leaves the table.
+	release func()
 
 	// streaming bookkeeping (SnowLuma-style multi-frame replies)
 	streaming bool
@@ -151,6 +154,11 @@ func (t *pendingTable) RemoveByConn(connID string) int {
 func (t *pendingTable) removeLocked(key string, pa *pendingAction) {
 	if pa.timer != nil {
 		pa.timer.Stop()
+		pa.timer = nil
+	}
+	if pa.release != nil {
+		pa.release()
+		pa.release = nil
 	}
 	delete(t.items, key)
 	connID := pa.conn.ID()

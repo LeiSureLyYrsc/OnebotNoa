@@ -19,18 +19,21 @@ type LocalActionHandler interface {
 	HandleAction(ctx context.Context, conn *DownstreamConn, frame onebot.ActionFrame, origEcho json.RawMessage) bool
 }
 
-// PreSendHook gates an outbound action (account-wide rate limit, per-binding
-// allow/deny lists). Implemented in I5; a nil hook allows everything.
+// PreSendHook gates an outbound action: allow/deny lists, quotas, in-flight
+// caps. A successful Allow reserves a slot that the caller must hand back with
+// Release (the pending table does that exactly once).
 type PreSendHook interface {
-	Allow(selfID, action string, bindingScope Scope) (retcode int, wording string, allowed bool)
+	Allow(req PreSendRequest) (retcode int, wording string, allowed bool)
+	Release(botName string)
 }
 
 // TrafficObserver receives the action traffic the relay carries, for the live
-// view (hub.EventLog implements it).
+// view and metrics (hub.EventLog and hub.Metrics implement it).
 type TrafficObserver interface {
 	BotAction(bot, selfID string, raw []byte)
 	BotResponse(bot string, raw []byte)
 	PolicyRejected(bot, action string, retcode int, reason string)
+	ActionTimedOut(bot, selfID string)
 }
 
 // ActionRouter implements the action half of the relay: it resolves the target
@@ -95,56 +98,93 @@ func (r *ActionRouter) HandleAction(ctx context.Context, conn *DownstreamConn, r
 		return
 	}
 
+	bot := conn.Bot()
+
+	// The scope is parsed before the policy runs so a malformed binding can
+	// never leave a reserved rate-limit slot behind.
+	scope, err := ParseScope(binding.Scope)
+	if err != nil {
+		r.reject(conn, frame, onebot.RetImplError, "binding scope is invalid: "+err.Error())
+		return
+	}
 	if r.preSend != nil {
-		scope, err := ParseScope(binding.Scope)
-		if err != nil {
-			r.reject(conn, frame, onebot.RetImplError, "binding scope is invalid: "+err.Error())
-			return
-		}
-		if code, msg, allowed := r.preSend.Allow(selfID, onebot.BaseAction(frame.Action), scope); !allowed {
+		code, msg, allowed := r.preSend.Allow(PreSendRequest{
+			Bot:    bot,
+			SelfID: selfID,
+			Action: onebot.BaseAction(frame.Action),
+			Scope:  scope,
+		})
+		if !allowed {
 			r.reject(conn, frame, code, msg)
 			return
 		}
 	}
 
-	session, ok := r.hub.Registry().Session(selfID)
-	if !ok || !session.CanSendActions() {
-		r.reject(conn, frame, onebot.RetImplError, "账号当前不可用（离线或缺少 API 连接）: "+selfID)
-		return
-	}
-
 	key := "hub@" + conn.ID() + ":" + strconv.FormatUint(r.seq.Add(1), 10)
 	upstreamFrame, err := buildUpstreamFrame(raw, key)
 	if err != nil {
+		r.releaseSlot(bot.Name)
 		r.reject(conn, frame, onebot.RetBadRequest, "invalid action frame: "+err.Error())
 		return
 	}
 
+	session, online := r.hub.Registry().Session(selfID)
+	canSend := online && session.CanSendActions()
+
+	queued := false
+	if !canSend {
+		if queue, ok := r.preSend.(OfflineQueuer); ok {
+			queued = queue.QueueOffline(selfID, upstreamFrame)
+		}
+		if !queued {
+			r.releaseSlot(bot.Name)
+			r.reject(conn, frame, onebot.RetImplError, "账号当前不可用（离线或缺少 API 连接）: "+selfID)
+			return
+		}
+	}
+
 	pa := &pendingAction{
 		conn:      conn.peer,
-		botID:     conn.Bot().ID,
-		botName:   conn.Bot().Name,
+		botID:     bot.ID,
+		botName:   bot.Name,
 		selfID:    selfID,
 		origEcho:  frame.Echo,
 		hasEcho:   len(frame.Echo) > 0,
 		createdAt: time.Now(),
+		// The slot is returned exactly once, when the entry leaves the table.
+		release: func() { r.releaseSlot(bot.Name) },
 	}
 	if err := r.pending.Add(key, pa, r.cfg.Policy.ActionTimeout.Std()); err != nil {
+		r.releaseSlot(bot.Name)
 		r.reject(conn, frame, onebot.RetImplError, "在途动作过多，请稍后重试")
 		return
 	}
 
-	if !session.SendAction(upstreamFrame) {
-		r.pending.Take(key) // releases the entry and its timer
+	if canSend && !session.SendAction(upstreamFrame) {
+		// Taking the entry also returns the slot and stops the timer.
+		r.pending.Take(key)
 		r.reject(conn, frame, onebot.RetImplError, "上游连接繁忙，动作未能发出")
 		return
 	}
 
 	if r.traffic != nil {
-		r.traffic.BotAction(conn.Bot().Name, selfID, upstreamFrame)
+		r.traffic.BotAction(bot.Name, selfID, upstreamFrame)
 	}
-	r.logger.Debug("action forwarded", "bot", conn.Bot().Name, "account", selfID,
-		"action", frame.Action, "echo", key)
+	r.logger.Debug("action forwarded", "bot", bot.Name, "account", selfID,
+		"action", frame.Action, "echo", key, "queued", queued)
+}
+
+// OfflineQueuer is an optional capability of a PreSendHook: buffer actions for
+// accounts that are temporarily offline.
+type OfflineQueuer interface {
+	QueueOffline(selfID string, frame []byte) bool
+}
+
+// releaseSlot hands a rate-limit/concurrency slot back to the policy engine.
+func (r *ActionRouter) releaseSlot(botName string) {
+	if r.preSend != nil {
+		r.preSend.Release(botName)
+	}
 }
 
 // HandleResponse processes one frame coming back from an upstream connection.
@@ -216,6 +256,7 @@ func (r *ActionRouter) onTimeout(pa *pendingAction) {
 	}
 	reply := onebot.FailureResponse(echo, onebot.RetImplError, wording)
 	if r.traffic != nil {
+		r.traffic.ActionTimedOut(pa.botName, pa.selfID)
 		r.traffic.BotResponse(pa.botName, reply)
 	}
 	if pa.conn.Send(reply) {

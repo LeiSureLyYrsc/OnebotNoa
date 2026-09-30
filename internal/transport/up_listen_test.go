@@ -64,11 +64,14 @@ func (o *recordingObserver) framesFor(selfID string) []observedFrame {
 }
 
 type upstreamEnv struct {
-	ts    *httptest.Server
-	hub   *hub.Hub
-	store *store.Store
-	cfg   *config.Config
-	obs   *recordingObserver
+	ts      *httptest.Server
+	hub     *hub.Hub
+	store   *store.Store
+	cfg     *config.Config
+	obs     *recordingObserver
+	policy  *hub.PolicyEngine
+	metrics *hub.Metrics
+	events  *hub.EventLog
 }
 
 func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
@@ -92,11 +95,25 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	logger := slog.New(slog.DiscardHandler)
 	relay := hub.New(cfg, st, logger)
 	obs := &recordingObserver{}
-	relay.SetObserver(obs)
+	metrics := hub.NewMetrics()
+	events := hub.NewEventLog(128)
+	policy := hub.NewPolicyEngine(cfg, logger)
+
+	// Mirror the production wiring so the integration tests exercise the real
+	// policy/metrics path.
+	relay.SetObserver(hub.FanOutObserver{obs, metrics, events})
+	relay.Actions().SetTrafficObserver(hub.FanOutTraffic{metrics, events})
+	relay.Actions().SetPreSend(policy)
+	relay.SetConnectHook(func(selfID string) {
+		policy.FlushOffline(selfID, func(frame []byte) bool { return relay.SendActionTo(selfID, frame) })
+	})
 
 	dp := NewDataPlane(cfg, st, relay, logger)
 	mux := http.NewServeMux()
 	dp.Register(mux)
+	if cfg.Metrics.Enable {
+		mux.HandleFunc("GET /metrics", MetricsHandler(metrics, relay, events, policy))
+	}
 	ts := httptest.NewServer(mux)
 
 	t.Cleanup(func() {
@@ -105,7 +122,10 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 		_ = st.Close()
 	})
 
-	return &upstreamEnv{ts: ts, hub: relay, store: st, cfg: cfg, obs: obs}
+	return &upstreamEnv{
+		ts: ts, hub: relay, store: st, cfg: cfg, obs: obs,
+		policy: policy, metrics: metrics, events: events,
+	}
 }
 
 func (e *upstreamEnv) dial(t *testing.T, path string, headers map[string]string) (*websocket.Conn, *http.Response, error) {

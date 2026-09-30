@@ -34,6 +34,7 @@ export function DashboardPage() {
 
   const relay = snap.status?.relay;
   const events = snap.status?.events;
+  const traffic = snap.status?.traffic;
 
   return (
     <Window
@@ -64,6 +65,13 @@ export function DashboardPage() {
         <Card title="待接入" value={String(relay?.pending_accounts ?? 0)} hint="未批准的 self_id 尝试" />
         <Card title="在途动作" value={String(relay?.pending_actions ?? 0)} hint="等待上游响应的 API 调用" />
         <Card title="事件环形缓冲" value={String(events?.ring_size ?? 0)} hint={"订阅 " + (events?.subscribers ?? 0) + " · 丢弃 " + (events?.dropped ?? 0)} />
+        <Card title="已转发动作" value={String(traffic?.actions_forwarded ?? 0)} hint={"上游帧 " + (traffic?.upstream_frames ?? 0) + " · 回投 " + (traffic?.responses_forwarded ?? 0)} />
+        <Card
+          title="限速拒绝"
+          value={String((traffic?.rate_limited_account ?? 0) + (traffic?.rate_limited_bot ?? 0) + (traffic?.rate_limited_inflight ?? 0))}
+          hint={"账号 " + (traffic?.rate_limited_account ?? 0) + " · Bot " + (traffic?.rate_limited_bot ?? 0) + " · 并发 " + (traffic?.rate_limited_inflight ?? 0)}
+        />
+        <Card title="超时 / 策略拒绝" value={String(traffic?.actions_timed_out ?? 0)} hint={"策略拒绝 " + (traffic?.actions_rejected ?? 0) + " · 离线排队 " + (traffic?.offline_queued ?? 0)} />
       </div>
 
       <h3>接入地址</h3>

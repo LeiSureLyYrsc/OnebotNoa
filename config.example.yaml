@@ -41,7 +41,8 @@ policy:
   write_queue_size: 1024
   meta_events: synthetic          # synthetic | passthrough | drop
   heartbeat_interval: 5s
-  per_account_rate: { rate: 1, burst: 5 }          # 账号级全局令牌桶（防风控）
+  per_account_rate: { rate: 1, burst: 5 }          # 账号级全局令牌桶（多个 Bot 共享，防风控；0=关闭）
+                                                   # 只对会发送/改状态的动作生效，get_* / can_* 不限速
   per_bot_rate: { rate: 5, burst: 10, concurrency: 4 }
   pending_per_conn: 512
   pending_global: 8192
@@ -52,6 +53,9 @@ storage:
   sqlite: ./data/onebotnoa.db
   event_ring: 2000
   session_ttl: 168h
+
+metrics:
+  enable: true                    # 暴露 /metrics（Prometheus 文本格式）；默认只监听本机
 
 log:
   level: info                     # debug | info | warn | error

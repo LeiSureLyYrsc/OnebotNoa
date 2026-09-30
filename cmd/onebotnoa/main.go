@@ -111,16 +111,30 @@ func runServe(args []string) error {
 	go runSessionCleanup(ctx, authManager, logger)
 
 	relay := hub.New(cfg, st, logger)
-	// One ring feeds the WebUI live view (SSE) and the dashboard counters.
+
+	// Live view (SSE ring), metrics and the policy engine all hang off the hub.
 	eventLog := hub.NewEventLog(cfg.Storage.EventRing)
-	relay.SetObserver(eventLog)
-	relay.Actions().SetTrafficObserver(eventLog)
+	metricsCollector := hub.NewMetrics()
+	policyEngine := hub.NewPolicyEngine(cfg, logger)
+	relay.SetObserver(hub.FanOutObserver{eventLog, metricsCollector})
+	relay.Actions().SetTrafficObserver(hub.FanOutTraffic{eventLog, metricsCollector})
+	relay.Actions().SetPreSend(policyEngine)
+	// Actions buffered while an account was offline are flushed on reconnect.
+	relay.SetConnectHook(func(selfID string) {
+		policyEngine.FlushOffline(selfID, func(frame []byte) bool {
+			return relay.SendActionTo(selfID, frame)
+		})
+	})
+	go runPolicySweep(ctx, policyEngine, logger)
 
 	dataPlane := transport.NewDataPlane(cfg, st, relay, logger)
 
 	startedAt := time.Now()
 	mux := transport.NewMux(transport.Options{Version: version, StartedAt: startedAt, Logger: logger})
 	dataPlane.Register(mux)
+	if cfg.Metrics.Enable {
+		mux.HandleFunc("GET /metrics", transport.MetricsHandler(metricsCollector, relay, eventLog, policyEngine))
+	}
 	api.New(api.Options{
 		Store:     st,
 		Auth:      authManager,
@@ -128,6 +142,8 @@ func runServe(args []string) error {
 		Config:    cfg,
 		Hub:       relay,
 		Events:    eventLog,
+		Metrics:   metricsCollector,
+		Policy:    policyEngine,
 		Version:   version,
 		StartedAt: startedAt,
 	}).Register(mux)
@@ -179,6 +195,25 @@ func runServe(args []string) error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// runPolicySweep prunes idle token buckets and expired queued actions.
+func runPolicySweep(ctx context.Context, policy *hub.PolicyEngine, logger *slog.Logger) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if removed := policy.Limiter().Sweep(15 * time.Minute); removed > 0 {
+				logger.Debug("pruned idle rate-limit buckets", "count", removed)
+			}
+			if dropped := policy.SweepOffline(); dropped > 0 {
+				logger.Info("dropped expired queued actions", "count", dropped)
+			}
+		}
+	}
 }
 
 // runSessionCleanup drops expired management sessions periodically.

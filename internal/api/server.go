@@ -34,6 +34,8 @@ type Options struct {
 	Config    *config.Config
 	Hub       *hub.Hub
 	Events    *hub.EventLog
+	Metrics   *hub.Metrics
+	Policy    *hub.PolicyEngine
 	Version   string
 	StartedAt time.Time
 }

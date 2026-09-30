@@ -72,6 +72,12 @@ func (c *DownstreamConn) Send(raw []byte) bool { return c.peer.Send(raw) }
 // Close closes the connection.
 func (c *DownstreamConn) Close(code int, reason string) { c.peer.Close(code, reason) }
 
+// Queued reports how many frames wait in this connection's send queue.
+func (c *DownstreamConn) Queued() int64 { return c.peer.Queued() }
+
+// Dropped reports how many frames the backpressure policy discarded.
+func (c *DownstreamConn) Dropped() int64 { return c.peer.Dropped() }
+
 // Bindings returns a copy of the account grants.
 func (c *DownstreamConn) Bindings() []model.Binding {
 	c.mu.RLock()

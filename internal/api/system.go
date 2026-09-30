@@ -3,7 +3,17 @@ package api
 import (
 	"net/http"
 	"time"
+
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 )
+
+// policyLimiter returns the policy engine's limiter when one is configured.
+func (s *Server) policyLimiter() *hub.Limiter {
+	if s.opt.Policy == nil {
+		return nil
+	}
+	return s.opt.Policy.Limiter()
+}
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -58,6 +68,9 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 			"subscribers": s.opt.Events.Subscribers(),
 			"dropped":     s.opt.Events.Dropped(),
 		}
+	}
+	if s.opt.Metrics != nil {
+		payload["traffic"] = s.opt.Metrics.Snapshot(s.policyLimiter(), s.opt.Policy)
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

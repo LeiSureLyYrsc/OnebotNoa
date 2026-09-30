@@ -38,6 +38,54 @@ type Observer interface {
 	UpstreamFrame(selfID string, role onebot.Role, raw []byte)
 }
 
+// FanOutObserver forwards to several observers (live view + metrics).
+type FanOutObserver []Observer
+
+// AccountChanged implements Observer.
+func (f FanOutObserver) AccountChanged(ev AccountEvent) {
+	for _, o := range f {
+		o.AccountChanged(ev)
+	}
+}
+
+// UpstreamFrame implements Observer.
+func (f FanOutObserver) UpstreamFrame(selfID string, role onebot.Role, raw []byte) {
+	for _, o := range f {
+		o.UpstreamFrame(selfID, role, raw)
+	}
+}
+
+// FanOutTraffic forwards to several traffic observers.
+type FanOutTraffic []TrafficObserver
+
+// BotAction implements TrafficObserver.
+func (f FanOutTraffic) BotAction(bot, selfID string, raw []byte) {
+	for _, o := range f {
+		o.BotAction(bot, selfID, raw)
+	}
+}
+
+// BotResponse implements TrafficObserver.
+func (f FanOutTraffic) BotResponse(bot string, raw []byte) {
+	for _, o := range f {
+		o.BotResponse(bot, raw)
+	}
+}
+
+// PolicyRejected implements TrafficObserver.
+func (f FanOutTraffic) PolicyRejected(bot, action string, retcode int, reason string) {
+	for _, o := range f {
+		o.PolicyRejected(bot, action, retcode, reason)
+	}
+}
+
+// ActionTimedOut implements TrafficObserver.
+func (f FanOutTraffic) ActionTimedOut(bot, selfID string) {
+	for _, o := range f {
+		o.ActionTimedOut(bot, selfID)
+	}
+}
+
 // NopObserver discards everything.
 type NopObserver struct{}
 
@@ -46,6 +94,14 @@ func (NopObserver) AccountChanged(AccountEvent) {}
 
 // UpstreamFrame implements Observer.
 func (NopObserver) UpstreamFrame(string, onebot.Role, []byte) {}
+
+// SetConnectHook registers a callback invoked whenever an account becomes able
+// to send actions (used to flush the offline action queue).
+func (h *Hub) SetConnectHook(fn func(selfID string)) {
+	h.registry.mu.Lock()
+	h.registry.onConnect = fn
+	h.registry.mu.Unlock()
+}
 
 // Dispatcher receives routed frames; implemented by the router in I3/I4.
 type Dispatcher interface {

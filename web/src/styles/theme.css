@@ -366,6 +366,10 @@ body {
   background: #f7d6d6;
 }
 
+.hub-pill--timeout {
+  background: #ffe0b8;
+}
+
 .hub-warn {
   padding: 6px 8px;
   background: #fff6d8;

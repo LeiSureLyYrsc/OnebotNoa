@@ -17,6 +17,7 @@ const (
 	EventKindAction   = "action"
 	EventKindResponse = "response"
 	EventKindPolicy   = "policy"
+	EventKindTimeout  = "timeout"
 )
 
 // defaultRawLimit caps how much of a frame is kept in the ring/appendix so a
@@ -275,6 +276,16 @@ func (l *EventLog) BotResponse(bot string, raw []byte) {
 		}
 	}
 	l.Publish(rec)
+}
+
+// ActionTimedOut records an action that never came back in time.
+func (l *EventLog) ActionTimedOut(bot, selfID string) {
+	l.Publish(EventRecord{
+		Kind:   EventKindTimeout,
+		Bot:    bot,
+		SelfID: selfID,
+		Note:   "上游超时未响应",
+	})
 }
 
 // PolicyRejected records a refused action.

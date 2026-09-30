@@ -54,7 +54,7 @@ export function EventsPage() {
       if (pausedRef.current) return;
       append(event.data);
     };
-    for (const kind of ["account", "upstream", "action", "response", "policy"]) {
+    for (const kind of ["account", "upstream", "action", "response", "policy", "timeout"]) {
       source.addEventListener(kind, (event) => {
         if (pausedRef.current) return;
         append((event as MessageEvent<string>).data);
@@ -139,6 +139,7 @@ export function EventsPage() {
           <option value="action">下行动作</option>
           <option value="response">上行响应</option>
           <option value="policy">策略拒绝</option>
+          <option value="timeout">上游超时</option>
         </select>
         <input placeholder="post_type" value={filters.post_type} onInput={(e) => setFilters({ ...filters, post_type: (e.target as HTMLInputElement).value })} />
         <input placeholder="group_id" value={filters.group_id} onInput={(e) => setFilters({ ...filters, group_id: (e.target as HTMLInputElement).value })} />

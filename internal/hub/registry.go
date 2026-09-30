@@ -63,9 +63,10 @@ type Registry struct {
 	pending  map[string]*PendingConn
 	policy   string
 
-	store    *store.Store
-	logger   *slog.Logger
-	observer Observer
+	store     *store.Store
+	logger    *slog.Logger
+	observer  Observer
+	onConnect func(selfID string)
 }
 
 func newRegistry(st *store.Store, logger *slog.Logger) *Registry {
@@ -182,6 +183,17 @@ func (r *Registry) AttachUpstream(ctx context.Context, info UpstreamInfo, peer P
 	})
 	r.logger.Info("upstream connection attached",
 		"self_id", selfID, "role", string(peer.Role()), "state", state, "addr", peer.RemoteAddr())
+
+	// The account can now accept API calls: let the caller flush anything that
+	// was queued while it was offline.
+	if session.CanSendActions() {
+		r.mu.Lock()
+		hook := r.onConnect
+		r.mu.Unlock()
+		if hook != nil {
+			hook(selfID)
+		}
+	}
 	return session, nil
 }
 

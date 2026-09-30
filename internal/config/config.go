@@ -44,6 +44,7 @@ type Config struct {
 	OneBot    OneBot     `yaml:"onebot"`
 	Policy    Policy     `yaml:"policy"`
 	Storage   Storage    `yaml:"storage"`
+	Metrics   Metrics    `yaml:"metrics"`
 	Log       Log        `yaml:"log"`
 	Endpoints []Endpoint `yaml:"endpoints"`
 	Dedicated []Listener `yaml:"dedicated"`
@@ -131,6 +132,11 @@ type Storage struct {
 	SQLite     string   `yaml:"sqlite"`
 	EventRing  int      `yaml:"event_ring"`
 	SessionTTL Duration `yaml:"session_ttl"`
+}
+
+// Metrics configures the Prometheus text endpoint.
+type Metrics struct {
+	Enable bool `yaml:"enable"`
 }
 
 // Log configures the structured logger.
@@ -234,7 +240,8 @@ func Default() *Config {
 			EventRing:  2000,
 			SessionTTL: Duration(7 * 24 * time.Hour),
 		},
-		Log: Log{Level: "info", Format: "json"},
+		Metrics: Metrics{Enable: true},
+		Log:     Log{Level: "info", Format: "json"},
 	}
 }
 

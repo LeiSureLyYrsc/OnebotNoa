@@ -109,6 +109,20 @@ export interface EventCounters {
   dropped: number;
 }
 
+export interface TrafficCounters {
+  uptime_seconds: number;
+  upstream_frames: number;
+  actions_forwarded: number;
+  responses_forwarded: number;
+  actions_rejected: number;
+  actions_timed_out: number;
+  account_events: number;
+  rate_limited_account: number;
+  rate_limited_bot: number;
+  rate_limited_inflight: number;
+  offline_queued: number;
+}
+
 export interface SystemStatus {
   version: string;
   uptime_sec: number;
@@ -120,6 +134,7 @@ export interface SystemStatus {
   session_ttl: string;
   relay?: RelayCounters;
   events?: EventCounters;
+  traffic?: TrafficCounters;
 }
 
 export interface EventRecord {
