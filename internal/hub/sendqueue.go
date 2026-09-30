@@ -101,20 +101,15 @@ func (q *sendQueue) Push(raw []byte) bool {
 // pings and closure as well). Callers must not send on it.
 func (q *sendQueue) C() <-chan []byte { return q.ch }
 
-// Pop returns the next frame, or ok=false once the queue is closed and drained.
-func (q *sendQueue) Pop() ([]byte, bool) {
-	frame, ok := <-q.ch
-	if !ok {
-		return nil, false
-	}
-	return frame, true
-}
-
-// Close stops accepting frames and unblocks Pop once drained.
+// Close stops accepting frames.
+//
+// The channel is deliberately NOT closed: a producer may be in the middle of a
+// send when the consumer goes away, and closing it would turn that into a
+// "send on closed channel" panic (the race detector catches the same thing).
+// Readers stop through the connection's done channel instead, so the queue can
+// simply be abandoned.
 func (q *sendQueue) Close() {
-	if q.closed.CompareAndSwap(false, true) {
-		close(q.ch)
-	}
+	q.closed.CompareAndSwap(false, true)
 }
 
 // Len reports the number of queued frames.

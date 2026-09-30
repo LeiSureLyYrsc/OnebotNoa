@@ -92,15 +92,17 @@ func TestSendQueueBlockTimesOut(t *testing.T) {
 	}
 }
 
-func TestSendQueueCloseRefusesAndUnblocks(t *testing.T) {
+func TestSendQueueCloseRefusesFrames(t *testing.T) {
 	q := newSendQueue(2, PolicyDropOldest, time.Second, nil)
 	q.Close()
 	if q.Push([]byte("a")) {
 		t.Fatal("a closed queue must refuse frames")
 	}
-	if _, ok := q.Pop(); ok {
-		t.Fatal("Pop on a closed, drained queue must report false")
-	}
-	// Closing twice must not panic.
+	// Closing twice must not panic, and the channel must stay usable for a
+	// producer that was already inside Push (it is never closed).
 	q.Close()
+	q.ch <- []byte("late")
+	if q.Len() != 1 {
+		t.Fatalf("queue length = %d, want 1", q.Len())
+	}
 }
