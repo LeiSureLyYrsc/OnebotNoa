@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
@@ -143,7 +144,7 @@ func TestPendingTableCapsAndCleanup(t *testing.T) {
 	tbl := newPendingTable(2, 3, nil)
 
 	add := func(key string, conn Peer) error {
-		return tbl.Add(key, &pendingAction{conn: conn})
+		return tbl.Add(key, &pendingAction{conn: conn, createdAt: time.Now()}, time.Minute)
 	}
 	if err := add("a", fake); err != nil {
 		t.Fatal(err)
@@ -181,5 +182,30 @@ func TestPendingTableCapsAndCleanup(t *testing.T) {
 	}
 	if n := tbl.CountForConn("conn-2"); n != 0 {
 		t.Fatalf("CountForConn(conn-2) = %d, want 0", n)
+	}
+
+	// Streaming bookkeeping goes through the table so the timeout goroutine and
+	// the reply path never race on an entry.
+	if exceeded, ok := tbl.Touch("missing", time.Second, time.Minute); ok || exceeded {
+		t.Fatal("Touch on an unknown key must report nothing")
+	}
+	if exceeded, ok := tbl.Touch("b", time.Second, time.Minute); !ok || exceeded {
+		t.Fatalf("Touch(b) = exceeded %v ok %v, want false, true", exceeded, ok)
+	}
+	if n := tbl.Frames("b"); n != 1 {
+		t.Fatalf("Frames(b) = %d, want 1", n)
+	}
+	if exceeded, ok := tbl.Touch("b", time.Second, 0); !ok || exceeded {
+		t.Fatal("a zero max duration must not count as exceeded")
+	}
+	// A cap that has already elapsed must be reported as exceeded. Use a fresh
+	// table (the one above is at its global cap) and an explicitly old entry,
+	// because the Windows clock is too coarse for "just added".
+	fresh := newPendingTable(2, 3, nil)
+	if err := fresh.Add("aged", &pendingAction{conn: fake, createdAt: time.Now().Add(-time.Hour)}, time.Minute); err != nil {
+		t.Fatalf("add aged entry: %v", err)
+	}
+	if exceeded, ok := fresh.Touch("aged", time.Second, time.Minute); !ok || !exceeded {
+		t.Fatalf("elapsed cap: exceeded %v ok %v, want true, true", exceeded, ok)
 	}
 }

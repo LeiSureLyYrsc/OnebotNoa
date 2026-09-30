@@ -216,13 +216,15 @@ func (h *Hub) HandleDownstream(ctx context.Context, info DownstreamInfo, peer Pe
 		if err != nil {
 			return fmt.Errorf("hub: transparent view requested for unknown account %s", info.FixedSelfID)
 		}
-		conn.mu.RLock()
+		conn.mu.Lock()
 		_, bound := conn.bindings[account.ID]
-		conn.mu.RUnlock()
+		if bound {
+			conn.fixedAccountID = account.ID
+		}
+		conn.mu.Unlock()
 		if !bound {
 			return fmt.Errorf("hub: account %s is not bound to bot %s", info.FixedSelfID, info.Bot.Name)
 		}
-		conn.fixedAccountID = account.ID
 	}
 	h.addDownstream(conn)
 	defer h.removeDownstream(conn)

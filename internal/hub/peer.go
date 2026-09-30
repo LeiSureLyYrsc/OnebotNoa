@@ -81,7 +81,12 @@ type wsPeer struct {
 	dropped atomic.Int64
 	sent    atomic.Int64
 
-	deadlineMu     sync.RWMutex
+	// identityMu guards selfID: it is empty until the first frame reveals it and
+	// it is read from the routing goroutines.
+	identityMu sync.RWMutex
+	selfID     string
+
+	deadlineMu       sync.RWMutex
 	deadlineOverride time.Time
 }
 
@@ -112,9 +117,10 @@ func NewWSPeer(conn *websocket.Conn, opt PeerOptions, logger *slog.Logger) *wsPe
 	p := &wsPeer{
 		opt:    opt,
 		conn:   conn,
-		logger: logger.With("conn", opt.ID, "kind", opt.Kind, "role", string(opt.Role), "self_id", opt.SelfID),
+		logger: logger.With("conn", opt.ID, "kind", opt.Kind, "role", string(opt.Role)),
 		send:   make(chan []byte, opt.QueueSize),
 		done:   make(chan struct{}),
+		selfID: opt.SelfID,
 	}
 
 	conn.SetReadLimit(opt.MaxFrameBytes)
@@ -128,7 +134,11 @@ func NewWSPeer(conn *websocket.Conn, opt PeerOptions, logger *slog.Logger) *wsPe
 func (p *wsPeer) ID() string               { return p.opt.ID }
 func (p *wsPeer) Kind() string             { return p.opt.Kind }
 func (p *wsPeer) Role() onebot.Role        { return p.opt.Role }
-func (p *wsPeer) SelfID() string           { return p.opt.SelfID }
+func (p *wsPeer) SelfID() string {
+	p.identityMu.RLock()
+	defer p.identityMu.RUnlock()
+	return p.selfID
+}
 func (p *wsPeer) RemoteAddr() string       { return p.opt.RemoteAddr }
 func (p *wsPeer) UserAgent() string        { return p.opt.UserAgent }
 func (p *wsPeer) TokenFingerprint() string { return p.opt.TokenFingerprint }
@@ -140,13 +150,15 @@ func (p *wsPeer) Queued() int64 { return int64(len(p.send)) }
 
 // Label identifies a connection in logs and in the WebUI.
 func (p *wsPeer) Label() string {
-	return p.opt.Kind + "/" + p.opt.SelfID + "/" + string(p.opt.Role) + "/" + p.opt.ID
+	return p.opt.Kind + "/" + p.SelfID() + "/" + string(p.opt.Role) + "/" + p.opt.ID
 }
 
 // SetSelfID updates the identity once the first frame revealed it.
 func (p *wsPeer) SetSelfID(selfID string) {
-	p.opt.SelfID = selfID
-	p.logger = p.logger.With("self_id", selfID)
+	p.identityMu.Lock()
+	p.selfID = selfID
+	p.identityMu.Unlock()
+	p.logger.Debug("connection identified by its first frame", "self_id", selfID)
 }
 
 // SetReadDeadlineOverride forces an earlier read deadline; the zero value clears
@@ -253,30 +265,29 @@ func (p *wsPeer) WriteLoop() {
 		case <-p.done:
 			return
 		case msg := <-p.send:
-			if !p.write(websocket.TextMessage, msg) {
+			if err := p.write(websocket.TextMessage, msg); err != nil {
+				p.logger.Debug("write failed", "error", err)
+				p.Close(websocket.CloseInternalServerErr, "write failed")
 				return
 			}
+			p.sent.Add(1)
 		case <-ticker.C:
-			if !p.write(websocket.PingMessage, nil) {
+			if err := p.write(websocket.PingMessage, nil); err != nil {
+				p.logger.Debug("ping failed", "error", err)
+				p.Close(websocket.CloseInternalServerErr, "write failed")
 				return
 			}
 		}
 	}
 }
 
-func (p *wsPeer) write(messageType int, payload []byte) bool {
+// write performs one serialised write. It must not call Close while holding the
+// write mutex: Close takes the same mutex to send its close frame.
+func (p *wsPeer) write(messageType int, payload []byte) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	_ = p.conn.SetWriteDeadline(time.Now().Add(p.opt.WriteTimeout))
-	if err := p.conn.WriteMessage(messageType, payload); err != nil {
-		p.logger.Debug("write failed", "error", err)
-		p.Close(websocket.CloseInternalServerErr, "write failed")
-		return false
-	}
-	if payload != nil {
-		p.sent.Add(1)
-	}
-	return true
+	return p.conn.WriteMessage(messageType, payload)
 }
 
 // Close closes the connection once and wakes the write loop.

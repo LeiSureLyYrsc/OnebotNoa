@@ -225,23 +225,30 @@ func TestSameEchoFromTwoBotsIsIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, keyA := impl.readAction(3 * time.Second)
-	_, keyB := impl.readAction(3 * time.Second)
-	if keyA == keyB {
-		t.Fatalf("relay must rewrite echo values, both were %q", keyA)
+	// Arrival order is not deterministic, so map each rewritten echo back to its
+	// Bot by inspecting the forwarded params.
+	frame1, key1 := impl.readAction(3 * time.Second)
+	frame2, key2 := impl.readAction(3 * time.Second)
+	if key1 == key2 {
+		t.Fatalf("relay must rewrite echo values, both were %q", key1)
 	}
-	if !strings.HasPrefix(keyA, "hub@") || !strings.HasPrefix(keyB, "hub@") {
-		t.Fatalf("unexpected rewritten echo values: %q %q", keyA, keyB)
+	if !strings.HasPrefix(key1, "hub@") || !strings.HasPrefix(key2, "hub@") {
+		t.Fatalf("unexpected rewritten echo values: %q %q", key1, key2)
+	}
+	if !strings.Contains(string(frame1), "from-a") && !strings.Contains(string(frame2), "from-a") {
+		t.Fatalf("neither forwarded frame came from bot A: %s | %s", frame1, frame2)
+	}
+	if !strings.Contains(string(frame1), "from-b") && !strings.Contains(string(frame2), "from-b") {
+		t.Fatalf("neither forwarded frame came from bot B: %s | %s", frame1, frame2)
+	}
+	keyForA, keyForB := key1, key2
+	if strings.Contains(string(frame1), "from-b") {
+		keyForA, keyForB = key2, key1
 	}
 
 	// Replies must go back to the right Bot with the original echo restored.
-	if keyA < keyB {
-		impl.reply(keyA, `{"message_id":1,"message":"A"}`)
-		impl.reply(keyB, `{"message_id":2,"message":"B"}`)
-	} else {
-		impl.reply(keyB, `{"message_id":2,"message":"B"}`)
-		impl.reply(keyA, `{"message_id":1,"message":"A"}`)
-	}
+	impl.reply(keyForA, `{"message_id":1,"message":"A"}`)
+	impl.reply(keyForB, `{"message_id":2,"message":"B"}`)
 
 	gotA := string(readBotFrame(t, connA, 3*time.Second))
 	gotB := string(readBotFrame(t, connB, 3*time.Second))

@@ -116,16 +116,13 @@ func (r *ActionRouter) HandleAction(ctx context.Context, conn *DownstreamConn, r
 		hasEcho:   len(frame.Echo) > 0,
 		createdAt: time.Now(),
 	}
-	if err := r.pending.Add(key, pa); err != nil {
+	if err := r.pending.Add(key, pa, r.cfg.Policy.ActionTimeout.Std()); err != nil {
 		r.reject(conn, frame, onebot.RetImplError, "在途动作过多，请稍后重试")
 		return
 	}
-	pa.timer = time.AfterFunc(r.cfg.Policy.ActionTimeout.Std(), func() { r.pending.expire(key) })
 
 	if !session.SendAction(upstreamFrame) {
-		if taken, ok := r.pending.Take(key); ok && taken.timer != nil {
-			taken.timer.Stop()
-		}
+		r.pending.Take(key) // releases the entry and its timer
 		r.reject(conn, frame, onebot.RetImplError, "上游连接繁忙，动作未能发出")
 		return
 	}
@@ -157,28 +154,27 @@ func (r *ActionRouter) HandleResponse(raw []byte) {
 	// frames followed by a terminal response. The pending entry must survive
 	// every intermediate frame, otherwise the stream would be truncated.
 	if isStreamFrame(raw) {
-		pa.frames++
-		if time.Since(pa.createdAt) > r.cfg.Policy.StreamMaxTimeout.Std() {
-			r.finish(key, pa)
-		} else {
-			if pa.timer != nil {
-				pa.timer.Stop()
-			}
-			pa.streaming = true
-			pa.timer = time.AfterFunc(r.cfg.Policy.StreamIdleTimeout.Std(), func() { r.pending.expire(key) })
+		exceeded, ok := r.pending.Touch(key,
+			r.cfg.Policy.StreamIdleTimeout.Std(), r.cfg.Policy.StreamMaxTimeout.Std())
+		if !ok {
+			r.logger.Warn("stream frame for an action that is no longer tracked", "echo", key)
+			return
+		}
+		if exceeded {
+			r.logger.Warn("stream exceeded its maximum duration", "echo", key)
+			r.finish(key)
 		}
 		pa.conn.Send(out)
 		return
 	}
 
-	r.finish(key, pa)
+	r.finish(key)
 	pa.conn.Send(out)
 }
 
-func (r *ActionRouter) finish(key string, pa *pendingAction) {
-	if taken, ok := r.pending.Take(key); ok && taken.timer != nil {
-		taken.timer.Stop()
-	}
+// finish releases a pending entry together with its timer.
+func (r *ActionRouter) finish(key string) {
+	r.pending.Take(key)
 }
 
 // DropConn removes every in-flight action of a disconnected Bot connection.
