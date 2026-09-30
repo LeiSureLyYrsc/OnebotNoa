@@ -214,6 +214,12 @@ docker pull ghcr.io/leisurelyyrsc/onebotnoa:latest
 - [x] I8 HTTP 兼容层（上游 HTTP 上报 + 下游 HTTP API + 显式未实现的 quick-operation）
 - [x] I9 独立监听端口运行时热重建、TLS、部署产物与文档
 
+## 文档
+
+- [设计建议](docs/DESIGN.md)：为什么这样设计（角色、端口方案、数据模型、兼容性红线）
+- [实现笔记](docs/IMPLEMENTATION.md)：实际行为、关键不变式、与设计不同之处、已知边界
+- [配置说明](config.example.yaml)：每个配置项的含义与默认值
+
 ---
 
 ## 许可
