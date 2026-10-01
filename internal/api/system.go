@@ -52,14 +52,14 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	if s.opt.Hub != nil {
 		st := s.opt.Hub.Status()
 		payload["relay"] = map[string]any{
-			"accounts":          st.Accounts,
-			"online":            st.Online,
-			"degraded":          st.Degraded,
-			"offline":           st.Offline,
-			"upstream_conns":    st.UpstreamConns,
-			"downstream_conns":  st.DownstreamConns,
-			"pending_accounts":  st.PendingAccounts,
-			"pending_actions":   st.PendingActions,
+			"accounts":         st.Accounts,
+			"online":           st.Online,
+			"degraded":         st.Degraded,
+			"offline":          st.Offline,
+			"upstream_conns":   st.UpstreamConns,
+			"downstream_conns": st.DownstreamConns,
+			"pending_accounts": st.PendingAccounts,
+			"pending_actions":  st.PendingActions,
 		}
 	}
 	if s.opt.Events != nil {

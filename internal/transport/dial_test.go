@@ -2,7 +2,6 @@ package transport
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -16,7 +15,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 )
 
 // ---------------------------------------------------------------- fake peers
@@ -212,7 +210,7 @@ func (s *fakeBotServer) connections() int {
 
 func (e *upstreamEnv) startDialer(t *testing.T, specs ...EndpointSpec) *DialManager {
 	t.Helper()
-	manager := NewDialManager(e.cfg, e.store, e.hub, slog.New(slog.DiscardHandler))
+	manager := NewDialManager(e.cfg, e.conns, e.hub, slog.New(slog.DiscardHandler))
 	manager.Start(e.ctx, specs)
 	t.Cleanup(manager.Stop)
 	return manager
@@ -381,68 +379,71 @@ func TestDisabledEndpointDoesNotDial(t *testing.T) {
 	}
 }
 
-func TestLoadEndpointSpecsMergesConfigAndDatabase(t *testing.T) {
-	ctx := context.Background()
+// TestLoadEndpointSpecsReadsTheConnectionFile pins what the dial manager takes
+// from connect.json: dial kinds only, names resolved to ids, credentials and the
+// backoff schedule carried over intact.
+func TestLoadEndpointSpecsReadsTheConnectionFile(t *testing.T) {
 	env := newUpstreamEnv(t, nil)
-
 	bot, _ := env.createBot(t, "spec-bot")
-	cfg := config.Default()
-	enabled := true
-	cfg.Endpoints = []config.Endpoint{
-		{Name: "from-config", Kind: config.KindUpstreamDial, URL: "ws://127.0.0.1:6700/", AccountHint: "90001", Enabled: &enabled},
-		{Name: "overridden", Kind: config.KindUpstreamDial, URL: "ws://old/", AccountHint: "1"},
-		// config.yaml refers to a Bot by name; the loader resolves it.
-		{Name: "config-bot", Kind: config.KindDownstreamDial, URL: "ws://127.0.0.1:8080/onebot/v11/ws", BotName: bot.Name},
-		// ... and an unknown name is reported rather than silently dialed.
-		{Name: "ghost-bot", Kind: config.KindDownstreamDial, URL: "ws://127.0.0.1:8080/onebot/v11/ws", BotName: "nope"},
-	}
+	account := env.createAccount(t, "90001")
 
-	botID := bot.ID
-	if _, err := env.store.CreateEndpoint(ctx, model.Endpoint{
-		Name: "from-db", Kind: config.KindDownstreamDial, URL: "ws://127.0.0.1:8080/onebot/v11/ws",
-		BotID: &botID, Mode: "universal", Enabled: true,
-		Reconnect: []byte(`{"min":"2s","max":"30s","jitter":0.25}`),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.store.CreateEndpoint(ctx, model.Endpoint{
-		Name: "overridden", Kind: config.KindUpstreamDial, URL: "ws://new/", AccountHint: "2",
-		Mode: "split", Enabled: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	env.conns.addConnection(ConnectionRef{
+		Name: "qq-90001", Kind: config.KindUpstreamDial, URL: "ws://127.0.0.1:6700/",
+		AccountSelfID: account.SelfID, Mode: "split", Enabled: true,
+		Min: "2s", Max: "30s", Jitter: 0.25, HasToken: true,
+	})
+	// A downstream dial target names its Bot; the loader resolves the id.
+	env.conns.addConnection(ConnectionRef{
+		Name: "bot-spec", Kind: config.KindDownstreamDial, URL: "ws://127.0.0.1:8080/onebot/v11/ws",
+		BotName: bot.Name, Enabled: true,
+	})
+	// A downstream dial target with no Bot cannot be dialed at all.
+	env.conns.addConnection(ConnectionRef{
+		Name: "ghost-bot", Kind: config.KindDownstreamDial, URL: "ws://127.0.0.1:8080/onebot/v11/ws",
+		Enabled: true,
+	})
+	// A dedicated listener belongs to the listener manager, not this loader.
+	env.conns.addConnection(ConnectionRef{
+		Name: "listener-only", Kind: config.KindUpstreamListen, Addr: "127.0.0.1:0",
+		Path: "/onebot/v11/ws", AccountSelfID: account.SelfID, Enabled: true,
+	})
+	// A dial target without a url is reported, not dialed into the void.
+	env.conns.addConnection(ConnectionRef{Name: "no-url", Kind: config.KindUpstreamDial, Enabled: true})
 
-	specs := LoadEndpointSpecs(ctx, cfg, env.store, slog.New(slog.DiscardHandler))
+	specs := LoadEndpointSpecs(env.conns, slog.New(slog.DiscardHandler))
 	byName := map[string]EndpointSpec{}
 	for _, spec := range specs {
 		byName[spec.Name] = spec
 	}
-	// 4 from config.yaml (one of them overriding, one referencing an unknown
-	// Bot) plus 1 from the database.
-	if len(specs) != 5 {
-		t.Fatalf("specs = %d, want 5: %+v", len(specs), specs)
+	if len(specs) != 2 {
+		t.Fatalf("specs = %d, want 2 (dial kinds only): %+v", len(specs), specs)
 	}
-	if spec := byName["config-bot"]; spec.BotID != bot.ID || spec.BotName != bot.Name {
-		t.Fatalf("config Bot name not resolved: %+v", spec)
+	if _, ok := byName["listener-only"]; ok {
+		t.Fatal("a dedicated listener must not become a dial target")
 	}
-	if spec, ok := byName["ghost-bot"]; !ok || spec.BotID != 0 {
-		t.Fatalf("a config endpoint with an unknown Bot should stay unresolved: %+v", spec)
+	if _, ok := byName["ghost-bot"]; ok {
+		t.Fatal("a downstream dial target without a Bot must be skipped")
 	}
-	if spec := byName["from-config"]; spec.Source != "config" || spec.URL != "ws://127.0.0.1:6700/" {
-		t.Fatalf("config endpoint not carried over: %+v", spec)
+	if _, ok := byName["no-url"]; ok {
+		t.Fatal("a dial target without a url must be skipped")
 	}
-	// The database row wins on a name clash.
-	if spec := byName["overridden"]; spec.Source != "database" || spec.URL != "ws://new/" || spec.Mode != "split" {
-		t.Fatalf("database override not applied: %+v", spec)
+
+	spec := byName["qq-90001"]
+	if spec.BotID != 0 || spec.AccountHint != account.SelfID || spec.Mode != "split" {
+		t.Fatalf("upstream dial spec not mapped: %+v", spec)
 	}
-	dbSpec := byName["from-db"]
-	if dbSpec.BotID != bot.ID || dbSpec.BotName != bot.Name {
-		t.Fatalf("bot not resolved: %+v", dbSpec)
+	if spec.Source != SourceFile || spec.DBID == 0 {
+		t.Fatalf("specs must carry their origin and id so the UI can edit them: %+v", spec)
 	}
-	if dbSpec.Reconnect.Min.Std() != 2*time.Second || dbSpec.Reconnect.Max.Std() != 30*time.Second || dbSpec.Reconnect.Jitter != 0.25 {
-		t.Fatalf("reconnect not parsed: %+v", dbSpec.Reconnect)
+	if spec.Reconnect.Min.Std() != 2*time.Second || spec.Reconnect.Max.Std() != 30*time.Second || spec.Reconnect.Jitter != 0.25 {
+		t.Fatalf("reconnect not parsed: %+v", spec.Reconnect)
 	}
-	if dbSpec.DBID == 0 {
-		t.Fatal("database endpoints must carry their id so the UI can edit them")
+	if !spec.Enabled {
+		t.Fatal("an enabled connection must produce an enabled spec")
+	}
+
+	botSpec := byName["bot-spec"]
+	if botSpec.BotID != bot.ID || botSpec.BotName != bot.Name {
+		t.Fatalf("Bot name not resolved to its id: %+v", botSpec)
 	}
 }

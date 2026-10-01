@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 )
 
@@ -107,15 +106,15 @@ func (d *DataPlane) authorizeUpstreamListener(binding listenerBinding, token, bo
 
 // downstreamListenerAllows reports whether a Bot may use a dedicated downstream
 // listener (it must be the Bot the listener was created for).
-func (d *DataPlane) downstreamListenerAllows(ctx context.Context, binding listenerBinding, token string) bool {
+func (d *DataPlane) downstreamListenerAllows(binding listenerBinding, token string) bool {
 	if token == "" {
 		return false
 	}
 	if binding.BotID == 0 && binding.BotName == "" {
 		return true
 	}
-	bot, err := d.store.BotByTokenHash(ctx, auth.HashToken(token))
-	if err != nil {
+	bot, found := d.conns.BotByToken(token)
+	if !found {
 		return false
 	}
 	if binding.BotID != 0 {

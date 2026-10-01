@@ -10,7 +10,6 @@ import (
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
 
 // LocalActionHandler answers actions that the hub serves itself (get_status,
@@ -46,7 +45,6 @@ type TrafficObserver interface {
 // replies (including multi-frame streaming replies) and enforces timeouts.
 type ActionRouter struct {
 	cfg     *config.Config
-	store   *store.Store
 	hub     *Hub
 	logger  *slog.Logger
 	pending *pendingTable
@@ -58,13 +56,12 @@ type ActionRouter struct {
 }
 
 // NewActionRouter builds the router and its pending table.
-func NewActionRouter(cfg *config.Config, st *store.Store, h *Hub, logger *slog.Logger) *ActionRouter {
+func NewActionRouter(cfg *config.Config, _ ConnStore, h *Hub, logger *slog.Logger) *ActionRouter {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	r := &ActionRouter{
 		cfg:    cfg,
-		store:  st,
 		hub:    h,
 		logger: logger,
 	}

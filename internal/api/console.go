@@ -15,11 +15,12 @@ import (
 
 // consoleRequest is the API debugger payload: it mirrors a Bot frame.
 type consoleRequest struct {
-	SelfID string          `json:"self_id"`
-	Action string          `json:"action"`
-	Params json.RawMessage `json:"params"`
-	Echo   json.RawMessage `json:"echo"`
-	BotID  int64           `json:"bot_id"`
+	SelfID  string          `json:"self_id"`
+	Action  string          `json:"action"`
+	Params  json.RawMessage `json:"params"`
+	Echo    json.RawMessage `json:"echo"`
+	BotID   int64           `json:"bot_id"`
+	BotName string          `json:"bot_name"`
 	// Wait for the upstream reply (default) or return as soon as it is sent.
 	Async bool `json:"async"`
 }
@@ -66,7 +67,7 @@ func (s *Server) handleConsoleInvoke(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if req.SelfID == "" {
 		// Fall back to the only account the selected Bot may use.
-		resolved, problem := s.resolveConsoleAccount(ctx, req.BotID)
+		resolved, problem := s.resolveConsoleAccount(ctx, req.BotID, req.BotName)
 		if problem != "" {
 			writeError(w, http.StatusBadRequest, problem)
 			return
@@ -130,19 +131,22 @@ func (s *Server) handleConsoleInvoke(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveConsoleAccount picks the account when the caller did not name one.
-func (s *Server) resolveConsoleAccount(ctx context.Context, botID int64) (string, string) {
-	if botID > 0 {
-		bindings, err := s.opt.Store.BindingsByBot(ctx, botID)
-		if err != nil {
-			return "", "读取该 Bot 的绑定失败"
+func (s *Server) resolveConsoleAccount(ctx context.Context, botID int64, botName string) (string, string) {
+	if botID > 0 && botName == "" {
+		bot, ok := s.opt.Connections.BotByID(botID)
+		if !ok {
+			return "", "bot_id 不存在"
 		}
+		botName = bot.Name
+	}
+	if botName != "" {
 		enabled := []string{}
-		for _, binding := range bindings {
+		for _, binding := range s.opt.Connections.BindingsByBot(botName) {
 			if !binding.Enabled {
 				continue
 			}
-			if account, err := s.opt.Store.AccountByID(ctx, binding.AccountID); err == nil {
-				enabled = append(enabled, account.SelfID)
+			if _, ok := s.opt.Connections.AccountBySelfID(binding.AccountSelfID); ok {
+				enabled = append(enabled, binding.AccountSelfID)
 			}
 		}
 		if len(enabled) == 1 {
@@ -153,10 +157,7 @@ func (s *Server) resolveConsoleAccount(ctx context.Context, botID int64) (string
 		}
 		return "", "该 Bot 绑定了多个账号，请显式指定 self_id"
 	}
-	accounts, err := s.opt.Store.ListAccounts(ctx)
-	if err != nil {
-		return "", "读取账号失败"
-	}
+	accounts := s.opt.Connections.ListAccounts()
 	if len(accounts) == 1 {
 		return accounts[0].SelfID, ""
 	}

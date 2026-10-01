@@ -5,6 +5,7 @@ import {
   clearAccountToken,
   createAccount,
   deleteAccount,
+  getAccount,
   listAccounts,
   rejectPending,
   rotateAccountToken,
@@ -13,7 +14,7 @@ import {
   type Account,
   type PendingAccount,
 } from "../api";
-import { Empty, Modal, StateDot, TimeCell, Window } from "../ui";
+import { Empty, Modal, StateDot, Window } from "../ui";
 import { showSecret, toast } from "../state";
 
 export function AccountsPage() {
@@ -22,6 +23,7 @@ export function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [fileNote, setFileNote] = useState("");
   const [form, setForm] = useState({ self_id: "", name: "" });
 
   const load = useCallback(async () => {
@@ -29,6 +31,7 @@ export function AccountsPage() {
       const result = await listAccounts();
       setAccounts(result.accounts);
       setPending(result.pending ?? []);
+      setFileNote(result.file?.path ? "connect.json：" + result.file.path : "");
       setError("");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
@@ -61,6 +64,27 @@ export function AccountsPage() {
       await updateAccount(account.id, { enabled: !account.enabled });
       toast(account.enabled ? "已停用 " + account.self_id : "已启用 " + account.self_id);
       await load();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : String(err), "error");
+    }
+  }
+
+  // showConnection fetches the token + paste-ready address for one instance.
+  // It is a separate call because the token is deliberately not in the list view.
+  async function showConnection(account: Account) {
+    try {
+      const result = await getAccount(account.id);
+      const url = result.account.client_url || (result.account.endpoints ?? [])[0] || "";
+      const token = result.account.token || "";
+      if (!token) {
+        toast("该账号还没有 token，请先「签发 token」");
+        return;
+      }
+      showSecret(
+        "接入信息 — " + account.self_id,
+        url,
+        "token：" + token + "\n请求头：X-Self-ID: " + account.self_id + " / X-Client-Role: Universal",
+      );
     } catch (err) {
       toast(err instanceof ApiError ? err.message : String(err), "error");
     }
@@ -128,7 +152,7 @@ export function AccountsPage() {
         <>
           <p class="status-bar-field">{accounts.length} 个账号</p>
           <p class="status-bar-field">{pending.length} 个待接入</p>
-          <p class="status-bar-field">自动刷新 4s</p>
+          <p class="status-bar-field">{fileNote || "自动刷新 4s"}</p>
         </>
       }
     >
@@ -180,9 +204,9 @@ export function AccountsPage() {
               <th>别名</th>
               <th>状态</th>
               <th>物理连接</th>
+              <th>接入地址</th>
               <th>绑定</th>
               <th>token</th>
-              <th>最近活跃</th>
               <th />
             </tr>
           </thead>
@@ -204,12 +228,15 @@ export function AccountsPage() {
                         </div>
                       ))}
                 </td>
+                <td class="hub-mono">
+                  {(account.endpoints ?? []).length === 0
+                    ? "—"
+                    : (account.endpoints ?? []).map((url) => <div key={url}>{url}</div>)}
+                </td>
                 <td>{account.binding_count}</td>
                 <td>{account.has_token ? "已绑定" : "未绑定"}</td>
-                <td>
-                  <TimeCell iso={account.last_seen_at} />
-                </td>
                 <td class="hub-row">
+                  <button onClick={() => void showConnection(account)}>连接信息</button>
                   <button onClick={() => void issueToken(account)}>签发 token</button>
                   <button onClick={() => void dropToken(account)} disabled={!account.has_token}>
                     吊销

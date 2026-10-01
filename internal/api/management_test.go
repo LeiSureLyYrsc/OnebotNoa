@@ -99,19 +99,19 @@ func TestAccountLifecycleAndToken(t *testing.T) {
 	if len(token) < 32 {
 		t.Fatalf("token looks wrong: %q", token)
 	}
-	stored, err := a.st.AccountBySelfID(context.Background(), "10001")
-	if err != nil {
-		t.Fatal(err)
+	stored, ok := a.conns.AccountBySelfID("10001")
+	if !ok {
+		t.Fatal("account disappeared")
 	}
-	if !stored.HasToken {
-		t.Fatal("account should report a bound token")
+	if stored.Grant.Token == "" {
+		t.Fatal("the issued token must be persisted so it can be shown again")
 	}
-	if strings.Contains(stored.SelfID, token) {
-		t.Fatal("token must not be stored in the clear")
+	if stored.Grant.Token == token {
+		t.Fatal("the token must be sealed in the file, not written in the clear")
 	}
-	byToken, err := a.st.AccountByTokenHash(context.Background(), hashTokenForTest(token))
-	if err != nil {
-		t.Fatalf("the issued token must resolve to the account: %v", err)
+	byToken, ok := a.conns.AccountByToken(token)
+	if !ok {
+		t.Fatal("the issued token must resolve to the account")
 	}
 	if byToken.SelfID != "10001" {
 		t.Fatalf("token resolved to %s", byToken.SelfID)
@@ -123,9 +123,9 @@ func TestAccountLifecycleAndToken(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("patch account = %d", res.StatusCode)
 	}
-	after, err := a.st.AccountByID(context.Background(), id)
-	if err != nil {
-		t.Fatal(err)
+	after, ok := a.conns.AccountByID(id)
+	if !ok {
+		t.Fatal("account disappeared")
 	}
 	if after.Enabled || after.Name != "disabled" {
 		t.Fatalf("account not updated: %+v", after)
@@ -136,8 +136,8 @@ func TestAccountLifecycleAndToken(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("clear token = %d", res.StatusCode)
 	}
-	cleared, _ := a.st.AccountByID(context.Background(), id)
-	if cleared.HasToken {
+	cleared, _ := a.conns.AccountByID(id)
+	if cleared.Grant.Token != "" {
 		t.Fatal("token should be cleared")
 	}
 
@@ -163,7 +163,7 @@ func TestAccountLifecycleAndToken(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("delete account = %d", res.StatusCode)
 	}
-	if _, err := a.st.AccountByID(context.Background(), id); err == nil {
+	if _, ok := a.conns.AccountByID(id); ok {
 		t.Fatal("account still present after delete")
 	}
 
@@ -209,7 +209,7 @@ func TestBotLifecycleAndTokenRotation(t *testing.T) {
 	if token2 == token1 || token2 == "" {
 		t.Fatalf("rotation did not change the token (%q -> %q)", token1, token2)
 	}
-	if _, err := a.st.BotByTokenHash(context.Background(), hashTokenForTest(token1)); err == nil {
+	if _, ok := a.conns.BotByToken(token1); ok {
 		t.Fatal("the old token must stop working")
 	}
 
@@ -219,9 +219,9 @@ func TestBotLifecycleAndTokenRotation(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("patch bot = %d", res.StatusCode)
 	}
-	updated, err := a.st.BotByID(context.Background(), id)
-	if err != nil {
-		t.Fatal(err)
+	updated, ok := a.conns.BotByID(id)
+	if !ok {
+		t.Fatal("bot disappeared")
 	}
 	if updated.Enabled {
 		t.Fatal("bot should be disabled")
@@ -253,16 +253,9 @@ func TestBotLifecycleAndTokenRotation(t *testing.T) {
 func TestBindingLifecycleAndScopeValidation(t *testing.T) {
 	a := newTestAPI(t)
 	csrf := loginAdmin(t, a)
-	ctx := context.Background()
 
-	account, err := a.st.CreateAccount(ctx, "20001", "acc", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bot, err := a.st.CreateBot(ctx, "bot-x", hashTokenForTest("seed"), "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	account := a.seedAccount(t, "20001", "acc")
+	bot := a.seedBot(t, "bot-x", "bot-x-token")
 
 	body := fmt.Sprintf(`{"bot_id":%d,"account_id":%d,"is_default":true,"scope":{"post_types":["message"]}}`, bot.ID, account.ID)
 	res, payload := a.write(t, http.MethodPost, "/api/v1/bindings", body, csrf)
@@ -287,9 +280,9 @@ func TestBindingLifecycleAndScopeValidation(t *testing.T) {
 	}
 
 	// Invalid scope (bad meta_events) and malformed JSON.
-	bindings, err := a.st.ListBindings(ctx)
-	if err != nil || len(bindings) != 1 {
-		t.Fatalf("bindings = %d, %v", len(bindings), err)
+	bindings := a.conns.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("bindings = %d, want 1", len(bindings))
 	}
 	bindingID := bindings[0].ID
 
@@ -310,16 +303,20 @@ func TestBindingLifecycleAndScopeValidation(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("patch binding = %d", res.StatusCode)
 	}
-	updated, _ := a.st.BindingByID(ctx, bindingID)
-	if updated.Priority != 5 || updated.Enabled || !strings.Contains(string(updated.Scope), "exclude_self") {
+	updated, _ := a.conns.BindingByID(bindingID)
+	if updated.Priority != 5 || updated.Enabled {
 		t.Fatalf("binding not updated: %+v", updated)
+	}
+	encoded, _ := json.Marshal(updated.Scope)
+	if !strings.Contains(string(encoded), "exclude_self") {
+		t.Fatalf("binding scope not updated: %s", encoded)
 	}
 
 	res, _ = a.write(t, http.MethodDelete, fmt.Sprintf("/api/v1/bindings/%d", bindingID), "", csrf)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("delete binding = %d", res.StatusCode)
 	}
-	if remaining, _ := a.st.ListBindings(ctx); len(remaining) != 0 {
+	if remaining := a.conns.ListBindings(); len(remaining) != 0 {
 		t.Fatalf("binding survived delete: %+v", remaining)
 	}
 }
@@ -354,8 +351,19 @@ func TestListenerCRUDValidation(t *testing.T) {
 	a := newTestAPI(t)
 	csrf := loginAdmin(t, a)
 
+	// An upstream listener is pinned to one account, so it needs a real one.
+	account := a.seedAccount(t, "10001", "listener-owner")
+
+	// A listener with no account is refused: a port that serves "anyone" is not a
+	// dedicated listener.
+	res, _ := a.write(t, http.MethodPost, "/api/v1/listeners",
+		`{"name":"orphan","kind":"upstream_listen","bind_addr":"0.0.0.0:6711","path":"/onebot/v11/ws"}`, csrf)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("upstream listener without an account = %d, want 400", res.StatusCode)
+	}
+
 	res, payload := a.write(t, http.MethodPost, "/api/v1/listeners",
-		`{"name":"qq-10001","kind":"upstream_listen","bind_addr":"0.0.0.0:6710","path":"/onebot/v11/ws"}`, csrf)
+		fmt.Sprintf(`{"name":"qq-10001","kind":"upstream_listen","bind_addr":"0.0.0.0:6710","path":"/onebot/v11/ws","account_self_id":%q}`, account.SelfID), csrf)
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("create listener = %d (%v)", res.StatusCode, payload)
 	}
@@ -380,10 +388,11 @@ func TestListenerCRUDValidation(t *testing.T) {
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("path without slash = %d, want 400", res.StatusCode)
 	}
+	// A connection name is the document's key, so reusing one is a conflict.
 	res, _ = a.write(t, http.MethodPost, "/api/v1/listeners",
-		`{"name":"dup","kind":"upstream_listen","bind_addr":"0.0.0.0:6710","path":"/onebot/v11/ws"}`, csrf)
+		fmt.Sprintf(`{"name":"qq-10001","kind":"upstream_listen","bind_addr":"0.0.0.0:6711","path":"/onebot/v11/ws","account_self_id":%q}`, account.SelfID), csrf)
 	if res.StatusCode != http.StatusConflict {
-		t.Fatalf("duplicate addr+path = %d, want 409", res.StatusCode)
+		t.Fatalf("duplicate connection name = %d, want 409", res.StatusCode)
 	}
 
 	res, payload = a.do(t, http.MethodGet, "/api/v1/listeners", "", nil)
@@ -431,12 +440,15 @@ func TestEndpointCRUDAndValidation(t *testing.T) {
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("create endpoint = %d (%v)", res.StatusCode, payload)
 	}
-	stored, err := a.st.EndpointByName(context.Background(), "qq-10001")
-	if err != nil {
-		t.Fatal(err)
+	connection, ok := a.conns.ConnectionByName("qq-10001")
+	if !ok {
+		t.Fatal("connection was not stored")
 	}
-	if stored.Token != "sec" || !strings.Contains(string(stored.Reconnect), "30s") {
-		t.Fatalf("endpoint not stored as expected: %+v", stored)
+	if plain, err := a.conns.ConnectionToken(connection.ID); err != nil || plain != "sec" {
+		t.Fatalf("token not stored: %q %v", plain, err)
+	}
+	if connection.Reconnect == nil || connection.Reconnect.Max != "30s" {
+		t.Fatalf("reconnect not stored as expected: %+v", connection.Reconnect)
 	}
 
 	res, _ = a.write(t, http.MethodPost, "/api/v1/endpoints",
@@ -455,14 +467,17 @@ func TestEndpointCRUDAndValidation(t *testing.T) {
 	}
 
 	// Updating without a token keeps the stored one.
-	res, _ = a.write(t, http.MethodPatch, fmt.Sprintf("/api/v1/endpoints/%d", stored.ID),
+	res, _ = a.write(t, http.MethodPatch, fmt.Sprintf("/api/v1/endpoints/%d", connection.ID),
 		`{"name":"qq-10001","kind":"upstream_dial","url":"ws://127.0.0.1:6701/","account_hint":"10001","enabled":false}`, csrf)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("patch endpoint = %d", res.StatusCode)
 	}
-	updated, _ := a.st.EndpointByID(context.Background(), stored.ID)
-	if updated.URL != "ws://127.0.0.1:6701/" || updated.Enabled || updated.Token != "sec" {
-		t.Fatalf("endpoint not updated correctly: %+v", updated)
+	updated, _ := a.conns.ConnectionByID(connection.ID)
+	if updated.URL != "ws://127.0.0.1:6701/" || updated.Enabled {
+		t.Fatalf("connection not updated correctly: %+v", updated)
+	}
+	if plain, _ := a.conns.ConnectionToken(connection.ID); plain != "sec" {
+		t.Fatalf("the token must survive an update that does not set one: %q", plain)
 	}
 
 	// Forced reconnect without a running dialer is a 404, not a crash.
@@ -471,12 +486,12 @@ func TestEndpointCRUDAndValidation(t *testing.T) {
 		t.Fatalf("reconnect without a dialer = %d, want 404", res.StatusCode)
 	}
 
-	res, _ = a.write(t, http.MethodDelete, fmt.Sprintf("/api/v1/endpoints/%d", stored.ID), "", csrf)
+	res, _ = a.write(t, http.MethodDelete, fmt.Sprintf("/api/v1/endpoints/%d", connection.ID), "", csrf)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("delete endpoint = %d", res.StatusCode)
 	}
-	if _, err := a.st.EndpointByName(context.Background(), "qq-10001"); err == nil {
-		t.Fatal("endpoint survived delete")
+	if _, ok := a.conns.ConnectionByName("qq-10001"); ok {
+		t.Fatal("connection survived delete")
 	}
 }
 

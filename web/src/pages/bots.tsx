@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
-import { ApiError, createBot, deleteBot, listBots, rotateBotToken, updateBot, type Bot } from "../api";
-import { Empty, JsonEditor, Modal, TimeCell, Window } from "../ui";
+import { ApiError, createBot, deleteBot, getBot, listBots, rotateBotToken, updateBot, type Bot } from "../api";
+import { Empty, JsonEditor, Modal, Window } from "../ui";
 import { showSecret, toast } from "../state";
 
 export function BotsPage() {
@@ -69,6 +69,28 @@ export function BotsPage() {
     }
   }
 
+  // showConnection hands the operator the full paste-ready URL, token included.
+  // The relay keeps the token sealed in connect.json, so it can be shown again -
+  // unlike a hash-only credential.
+  async function showConnection(bot: Bot) {
+    try {
+      const result = await getBot(bot.id);
+      const token = result.bot.token || "";
+      if (!token) {
+        toast("该 Bot 还没有 token，请先「轮换 token」");
+        return;
+      }
+      const base = (result.bot.endpoints ?? [])[0] || "/onebot/v11/bot/ws";
+      showSecret(
+        "连接信息 — " + bot.name,
+        base + "/" + token,
+        "在地址末尾再加 /<self_id> 可得到只暴露一个账号的透明视图。token 也保存在 connect.json 中。",
+      );
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : String(err), "error");
+    }
+  }
+
   async function rotate(bot: Bot) {
     if (!window.confirm("轮换 " + bot.name + " 的 token？旧 token 立即失效。")) return;
     try {
@@ -121,9 +143,9 @@ export function BotsPage() {
               <th>名称</th>
               <th>状态</th>
               <th>连接</th>
+              <th>连接地址</th>
               <th>绑定账号</th>
               <th>备注</th>
-              <th>最近连接</th>
               <th />
             </tr>
           </thead>
@@ -133,12 +155,15 @@ export function BotsPage() {
                 <td>{bot.name}</td>
                 <td>{bot.enabled ? "启用" : "停用"}</td>
                 <td>{bot.connections}</td>
+                <td class="hub-mono">
+                  {(bot.endpoints ?? []).length === 0
+                    ? "—"
+                    : (bot.endpoints ?? []).map((url) => <div key={url}>{url}</div>)}
+                </td>
                 <td>{bot.binding_count}</td>
                 <td class="hub-muted">{bot.note || "—"}</td>
-                <td>
-                  <TimeCell iso={bot.last_seen_at} />
-                </td>
                 <td class="hub-row">
+                  <button onClick={() => void showConnection(bot)}>连接信息</button>
                   <button onClick={() => startEdit(bot)}>编辑</button>
                   <button onClick={() => void rotate(bot)}>轮换 token</button>
                   <button
@@ -176,7 +201,9 @@ export function BotsPage() {
                 onInput={(e) => setForm({ ...form, note: (e.target as HTMLInputElement).value })}
               />
             </label>
-            <p class="hub-muted">创建后会立即显示一次 token；中继只保存它的哈希。</p>
+            <p class="hub-muted">
+              创建后立即显示 token；它是 connect.json 里的加密条目，之后仍可在「连接信息」查看。
+            </p>
             <div class="hub-row hub-row--end">
               <button type="submit">创建</button>
               <button type="button" onClick={() => setCreating(false)}>

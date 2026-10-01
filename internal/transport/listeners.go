@@ -14,26 +14,24 @@ import (
 	"time"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
 
 // ListenerSpec is one dedicated data-plane listener (config.yaml or database).
 type ListenerSpec struct {
-	DBID         int64
-	Name         string
-	Kind         string
-	Addr         string
-	Path         string
-	AccountID    *int64
-	AccountHint  string
-	BotID        int64
-	BotName      string
-	FixedSelfID  string
-	TLSCert      string
-	TLSKey       string
-	Enabled      bool
-	Source       string
+	DBID        int64
+	Name        string
+	Kind        string
+	Addr        string
+	Path        string
+	AccountID   *int64
+	AccountHint string
+	BotID       int64
+	BotName     string
+	FixedSelfID string
+	TLSCert     string
+	TLSKey      string
+	Enabled     bool
+	Source      string
 }
 
 // ListenerState is the runtime view of a dedicated listener for the WebUI.
@@ -72,10 +70,10 @@ type listenerInstance struct {
 // that must post to a fixed URL, a Bot that expects its own port, and the shared
 // endpoints can all coexist.
 type ListenerManager struct {
-	cfg        *config.Config
-	store      *store.Store
-	dataPlane  *DataPlane
-	logger     *slog.Logger
+	cfg       *config.Config
+	conns     ConnStore
+	dataPlane *DataPlane
+	logger    *slog.Logger
 
 	mu        sync.Mutex
 	instances map[string]*listenerInstance
@@ -83,12 +81,12 @@ type ListenerManager struct {
 }
 
 // NewListenerManager builds the manager.
-func NewListenerManager(cfg *config.Config, st *store.Store, dp *DataPlane, logger *slog.Logger) *ListenerManager {
+func NewListenerManager(cfg *config.Config, conns ConnStore, dp *DataPlane, logger *slog.Logger) *ListenerManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &ListenerManager{
-		cfg: cfg, store: st, dataPlane: dp, logger: logger,
+		cfg: cfg, conns: conns, dataPlane: dp, logger: logger,
 		instances: map[string]*listenerInstance{},
 	}
 }
@@ -101,9 +99,9 @@ func (m *ListenerManager) Start(ctx context.Context, specs []ListenerSpec) {
 	m.Apply(specs)
 }
 
-// Reload re-reads config.yaml plus the database and applies the result.
+// Reload re-reads connect.json and applies the result.
 func (m *ListenerManager) Reload(ctx context.Context) {
-	m.Apply(LoadListenerSpecs(ctx, m.cfg, m.store, m.logger))
+	m.Apply(LoadListenerSpecs(m.conns, m.logger))
 }
 
 // Apply reconciles the running listeners with the desired set: unchanged specs
@@ -300,95 +298,12 @@ func defaultListenerPath(kind string) string {
 	return "/onebot/v11/ws"
 }
 
-// LoadListenerSpecs assembles the desired dedicated listeners from config.yaml
-// and the database (a database row with the same name wins).
-func LoadListenerSpecs(ctx context.Context, cfg *config.Config, st *store.Store, logger *slog.Logger) []ListenerSpec {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	specs := []ListenerSpec{}
-	byName := map[string]int{}
+var _ = valueOrZero
 
-	for _, raw := range cfg.Dedicated {
-		enabled := true
-		if raw.Enabled != nil {
-			enabled = *raw.Enabled
-		}
-		spec := ListenerSpec{
-			Name: raw.Name, Kind: raw.Kind, Addr: raw.Addr, Path: raw.Path,
-			AccountHint: raw.AccountSelfID, BotName: raw.BotName,
-			FixedSelfID: raw.FixedSelfID, TLSCert: raw.TLSCert, TLSKey: raw.TLSKey,
-			Enabled: enabled, Source: "config",
-		}
-		spec = resolveListenerSpec(ctx, st, spec, logger)
-		byName[spec.Name] = len(specs)
-		specs = append(specs, spec)
-	}
-
-	rows, err := st.ListListeners(ctx)
-	if err != nil {
-		logger.Warn("could not read dedicated listeners from the database", "error", err)
-		return specs
-	}
-	for _, row := range rows {
-		spec := ListenerSpec{
-			DBID: row.ID, Name: row.Name, Kind: row.Kind, Addr: row.BindAddr, Path: row.Path,
-			AccountID: row.AccountID, BotID: valueOrZero(row.BotID), FixedSelfID: row.FixedSelfID,
-			TLSCert: row.TLSCert, TLSKey: row.TLSKey, Enabled: row.Enabled, Source: "database",
-		}
-		spec = resolveListenerSpec(ctx, st, spec, logger)
-		if idx, exists := byName[spec.Name]; exists {
-			logger.Warn("a database listener overrides the configured one", "listener", spec.Name)
-			specs[idx] = spec
-			continue
-		}
-		byName[spec.Name] = len(specs)
-		specs = append(specs, spec)
-	}
-
-	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
-	return specs
-}
-
-// resolveListenerSpec fills in the account hint and Bot name the runtime needs.
-func resolveListenerSpec(ctx context.Context, st *store.Store, spec ListenerSpec, logger *slog.Logger) ListenerSpec {
-	if spec.Kind == config.KindDownstreamListen {
-		// Resolve in both directions: config.yaml names the Bot, the database
-		// stores its id, and the runtime view should always show the name.
-		if spec.BotID == 0 && spec.BotName != "" {
-			bot, err := st.BotByName(ctx, spec.BotName)
-			if err != nil {
-				logger.Warn("dedicated listener references a Bot that does not exist",
-					"listener", spec.Name, "bot", spec.BotName)
-				return spec
-			}
-			spec.BotID = bot.ID
-			spec.BotName = bot.Name
-			return spec
-		}
-		if spec.BotID != 0 {
-			if bot, err := st.BotByID(ctx, spec.BotID); err == nil {
-				spec.BotName = bot.Name
-			} else {
-				logger.Warn("dedicated listener references a Bot that no longer exists",
-					"listener", spec.Name, "bot_id", spec.BotID)
-			}
-		}
-		return spec
-	}
-	if spec.AccountHint == "" && spec.AccountID != nil {
-		if account, err := st.AccountByID(ctx, *spec.AccountID); err == nil {
-			spec.AccountHint = account.SelfID
-		}
-	}
-	return spec
-}
-
+// valueOrZero is kept for the tests and for callers that still hold a pointer.
 func valueOrZero(value *int64) int64 {
 	if value == nil {
 		return 0
 	}
 	return *value
 }
-
-var _ = model.Listener{}

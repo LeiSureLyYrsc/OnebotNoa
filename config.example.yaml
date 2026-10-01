@@ -1,6 +1,20 @@
-# OnebotNoa 配置样例。复制为 config.yaml 后修改（config.yaml 已在 .gitignore 中）。
-# 动态实体（QQ 实例 / Bot / 绑定 / 监听端口）在 WebUI 里管理并存于 SQLite；
-# 这里只放进程级静态配置与出站密钥。
+# OnebotNoa 配置样例 —— 这是「进程级静态配置」。
+#
+# 程序启动后会自主生成两份文件，职责严格分开：
+#
+#   config.yaml      本文件。手工维护，改动后需要重启。
+#                    监听地址、端点路径、限速与背压策略、日志。
+#
+#   connect.json     程序生成。连接、账号、Bot、绑定，以及它们需要的密钥。
+#                    在 WebUI 里改，或直接编辑文件（改完重启即生效）；
+#                    也可以整体导出/导入，用来备份或在另一台机器上恢复。
+#
+#   connect.json.key 与 connect.json 配套的本地密钥（0600）。connect.json 里的
+#                    token 用它加密，所以文档可以单独复制/贴进工单，而不等于
+#                    交出凭据。**两者要分开备份**：丢了密钥，已加密的 token
+#                    无法恢复（重新签发即可）。
+#
+# 判断某个配置该放哪里：需要重启 → 这里；运行中还要改 → connect.json。
 
 server:
   listen: 127.0.0.1:8080          # 默认只监听本机；公网部署请置于反代之后
@@ -17,7 +31,7 @@ onebot:
     path: /onebot/v11/ws
     require_token: true
     allow_query_token: true
-    bootstrap_token: ""          # 首次接入用的共享令牌（留空则只认账号级 token），建议逐个实例绑定独立 token
+    bootstrap_token: ""          # 首次接入用的共享令牌（留空则只认账号级 token）
     unknown_account_policy: pending   # pending | reject | auto
     identity_timeout: 3s              # 首帧兜底识别窗口
   downstream_ws:                  # Bot 侧（OneBot 应用端）接入
@@ -50,7 +64,9 @@ policy:
   pong_timeout: 10s
 
 storage:
-  sqlite: ./data/onebotnoa.db
+  sqlite: ./data/onebotnoa.db     # 管理数据库：登录、会话、设置、审计
+  connect_file: ./data/connect.json       # 连接文档（程序生成）
+  connect_key: ./data/connect.json.key    # 加密密钥（程序生成，与上面分开保存）
   event_ring: 2000
   session_ttl: 168h
 
@@ -62,50 +78,61 @@ log:
   format: json                    # json | text
   add_source: false
 
-# 中继主动拨号的目标（可选，I6 实现）。token 只在此处配置，不入库。
-endpoints: []
-#  - name: qq-10002
-#    kind: upstream_dial          # upstream_dial | downstream_dial
-#    url: ws://10.0.0.5:6700/
-#    mode: universal              # universal | split
-#    token: ""
-#    account_hint: "10002"
-#    reconnect: { min: 1s, max: 60s, jitter: 0.3 }
-#  - name: bot-nonebot
-#    kind: downstream_dial
-#    url: ws://10.0.0.9:8080/onebot/v11/ws
-#    token: ""
-#    bot_name: nonebot-main
-
-# 独立端口/路径监听（也可在 WebUI 动态增删，I9）。
-# 独立监听端口：给某个账号或某个 Bot 单独开一个地址。
-# 共享端点（上面的 upstream_ws / downstream_ws）用一条端口服务全部实例；
-# 独立端点用于物理隔离，并且可以在 WebUI 里增删改——运行时立即生效，不用重启。
+# ---------------------------------------------------------------------------
+# 以下内容已不在本文件里，全部搬到 connect.json：
 #
-# 上游独立监听必须指定账号（account_self_id 或 WebUI 里的 account_id），
-# 连接时仍然需要 token（该账号的 token 或 bootstrap_token）；带着有效 token
-# 但 self_id 不是该账号会被 403 拒绝。
-# 下游独立监听必须指定 Bot；可选的 fixed_self_id 让该端口只呈现一个账号，
-# 相当于把「透明单账号视图」固化到地址上。
-dedicated: []
-# dedicated:
-#   - name: qq-10001
-#     kind: upstream_listen
-#     addr: 127.0.0.1:6710
-#     path: /onebot/v11/ws
-#     account_self_id: "10001"
-#     enabled: true
-#   - name: bot-nonebot
-#     kind: downstream_listen
-#     addr: 127.0.0.1:6810
-#     path: /onebot/v11/bot/ws
-#     bot_name: nonebot2
-#     fixed_self_id: "10001"   # 可选：该端口只暴露这一个账号
-#     tls_cert: ""             # 同时提供 cert 与 key 即启用 TLS（wss）
-#     tls_key: ""
-#     enabled: true
-#  - name: qq-10001
-#    kind: upstream_listen
-#    addr: 0.0.0.0:6710
-#    path: /onebot/v11/ws
-#    account_self_id: "10001"
+#   accounts       QQ 实例、别名、状态、以及每个实例的 token
+#   bots           下游应用、策略（rate_limit / action_policy）、token
+#   connections    四种连接方式（upstream/downstream × listen/dial），含独立端口与 TLS
+#   bindings       哪个 Bot 可以用哪个账号，以及过滤范围
+#
+# 在 WebUI 里管理，或直接编辑 connect.json（参考下面这份结构示例）。
+# 旧版本写在 config.yaml 里的 endpoints / dedicated 已不再被识别：
+# 首次启动新版本时会自动从数据库迁移一次，之后请用 WebUI 或 connect.json。
+#
+# connect.json 结构：
+#
+# {
+#   "schema_version": 1,
+#   "accounts": [
+#     { "id": 1, "self_id": "10001", "name": "主号", "enabled": true,
+#       "grant": { "token": "enc:v1:...", "token_hash": "...", "sealed": true } }
+#   ],
+#   "bots": [
+#     { "id": 1, "name": "nonebot-main", "enabled": true,
+#       "rate_limit": {}, "action_policy": { "deny": ["set_group_ban"] },
+#       "grant": { "token": "enc:v1:...", "sealed": true } }
+#   ],
+#   "connections": [
+#     // QQ 实例主动接入：给某个账号单独开一个端口
+#     { "id": 1, "name": "qq-10001", "kind": "upstream_listen",
+#       "addr": "127.0.0.1:6710", "path": "/onebot/v11/ws",
+#       "account_self_id": "10001", "enabled": true },
+#     // 中继主动连 QQ 实现端
+#     { "id": 2, "name": "dial-qq", "kind": "upstream_dial",
+#       "url": "ws://10.0.0.5:6700/", "mode": "universal",
+#       "account_self_id": "10002", "enabled": true,
+#       "reconnect": { "min": "1s", "max": "60s", "jitter": 0.3 },
+#       "grant": { "token": "enc:v1:..." } },
+#     // Bot 主动接入：这个端口只服务一个 Bot
+#     { "id": 3, "name": "bot-nonebot", "kind": "downstream_listen",
+#       "addr": "127.0.0.1:6810", "path": "/onebot/v11/bot/ws",
+#       "bot_name": "nonebot-main", "fixed_self_id": "10001",
+#       "tls_cert": "", "tls_key": "", "enabled": true },
+#     // 中继主动连 Bot
+#     { "id": 4, "name": "dial-bot", "kind": "downstream_dial",
+#       "url": "ws://10.0.0.9:8080/onebot/v11/ws",
+#       "bot_name": "nonebot-main", "enabled": true }
+#   ],
+#   "bindings": [
+#     { "id": 1, "bot_name": "nonebot-main", "account_self_id": "10001",
+#       "priority": 100, "is_default": true, "enabled": true,
+#       "scope": { "post_types": ["message"], "exclude_self": true } }
+#   ]
+# }
+#
+# 手写注意：
+#   * grant.token 可以直接写明文，程序下次保存时会自动加密；
+#   * 上游独立监听必须给出 account_self_id（否则谁都能连这个端口）；
+#   * 下游拨号必须给出 bot_name；下游独立监听必须给出 bot_name；
+#   * 同一时刻每个 Bot 只能有一个 is_default（路由未指定 self_id 时用它）。

@@ -29,6 +29,7 @@
 - **可靠性**：账号级令牌桶（防风控）、Bot 配额、慢消费者隔离、挂起表上限、超时明确失败而非静默挂起。
 - **可观测**：结构化日志、审计、实时事件流（SSE）、API 调试台、Prometheus 文本指标。
 - **单二进制**：WebUI 通过 `go:embed` 打包，`CGO_ENABLED=0` 跨平台编译（纯 Go SQLite）。
+- **配置分两份**：`config.yaml` 放静态配置（改后重启），生成的 `connect.json` 放连接与密钥（改完即生效、可整体导出导入）。
 
 ---
 
@@ -120,6 +121,8 @@ ws://<hub-host>:8080/onebot/v11/bot/ws/<bot-token>/<self_id>
 | `/onebot/v11/ws/{token}` | WS | 路径 token 预绑定实例 |
 | `/onebot/v11/bot/ws[/{token}[/{self_id}]]` | WS | 下游 Bot 接入（聚合 / 透明单账号） |
 | `/api/v1/...` | REST | 管理 API（WebUI 使用） |
+| `/api/v1/connect` | GET/PUT | 导出 / 导入 connect.json（整份文档） |
+| `/api/v1/connect/{account,bot}/{id}` | GET | 该实例的接入地址与 token（复制即用） |
 | `/api/v1/events/stream` | SSE | 实时事件流 |
 | `/healthz` | GET | 健康检查（容器 healthcheck 使用） |
 | `/metrics` | GET | Prometheus 文本指标 |
@@ -127,16 +130,53 @@ ws://<hub-host>:8080/onebot/v11/bot/ws/<bot-token>/<self_id>
 
 ---
 
-## 配置
+## 两份配置文件
 
-进程级静态配置走 YAML（见 [config.example.yaml](config.example.yaml)），动态实体（账号 / Bot / 绑定 / 监听端口）在 WebUI 里管理并存于 SQLite。
+程序启动后自主生成**两份**文件，职责严格分开：
+
+| 文件 | 谁维护 | 放什么 | 何时生效 |
+|---|---|---|---|
+| `config.yaml` | 你手写 | 进程级静态配置：监听地址、端点路径、限速与背压策略、日志 | 改动后重启 |
+| **`connect.json`** | **程序生成** | 连接、账号、Bot、绑定，以及它们需要的密钥 | 改完保存即生效 |
+
+判断某个配置该放哪里很简单：**需要重启 → `config.yaml`；运行中还要改 → `connect.json`。**
+
+选择文件而不是数据库，是为了让连接表能被 `diff`、能整体复制到另一台机器、能贴进工单——同时
+管理数据库损坏也不会连带把数据面拖垮。
+
+`connect.json` 里的 token 用同目录的 `connect.json.key`（AES-256-GCM）加密，
+所以**文档本身可以单独分享，不等于交出凭据**；但两者要分开备份：丢了密钥，已加密的 token
+无法恢复（重新签发一个即可）。手写文件时可以直接写明文 token，下次保存会自动加密。
+
+WebUI 的「连接文件」页可以看到、导出、编辑并整体导入这份文档；账号页 / Bot 页的
+**「连接信息」**按钮直接给出可复制的接入地址与 token。
+
+### 快速试跑（不用真的装 QQ 端和 Bot）
+
+`test/` 目录（已被 `.gitignore` 排除）可以一键准备好一个能跑的环境：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File test\setup.ps1
+```
+
+它会构建二进制、写好配置、启动中继，并通过 API 建好示例账号 / Bot / 绑定，最后打印
+WebUI 地址、登录口令、账号 token 和 Bot 地址。再开两个终端：
+
+```bash
+node test/env/fake-peers.js qq  10001 <账号 token>   # 假装是 NapCat
+node test/env/fake-peers.js bot <bot token>          # 假装是 NoneBot2
+```
+
+就能在 WebUI 的「实时事件」页看到消息在两者之间流动。停止：`test\stop.ps1`。
 
 常用环境变量（优先级高于 YAML）：
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
 | `ONEBOTNOA_LISTEN` | 管理面与数据面监听地址 | `127.0.0.1:8080` |
-| `ONEBOTNOA_SQLITE` | SQLite 文件路径 | `./data/onebotnoa.db` |
+| `ONEBOTNOA_SQLITE` | 管理数据库路径 | `./data/onebotnoa.db` |
+| `ONEBOTNOA_CONNECT_FILE` | 连接文档路径 | `./data/connect.json` |
+| `ONEBOTNOA_CONNECT_KEY` | 连接文档的加密密钥路径 | `./data/connect.json.key` |
 | `ONEBOTNOA_ADMIN_PASSWORD` | 首启管理员密码（留空则随机生成并打印日志） | 空 |
 | `ONEBOTNOA_LOG_LEVEL` | `debug|info|warn|error` | `info` |
 | `ONEBOTNOA_LOG_FORMAT` | `json|text` | `json` |
@@ -172,7 +212,10 @@ cmd/onebotnoa/      CLI 入口（serve / reset-password / version）
 internal/onebot/    协议类型、retcode、动作/响应信封
 internal/hub/       连接、账号会话、绑定路由、echo 挂起表、限速、事件总线
 internal/transport/ 上游/下游 WS 端点、动态监听、HTTP 兼容层
-internal/store/     SQLite + 内嵌迁移
+internal/store/     SQLite（管理面）+ 内嵌迁移
+internal/connect/   connect.json 文档：读写、校验、导入导出、旧数据迁移
+internal/connstore/ connect.json → hub/数据面所需的视图
+internal/cryptobox/ 本地密钥 + AES-256-GCM（加密连接文档里的 token）
 internal/api/       管理 REST + SSE
 internal/auth/      会话、CSRF、密码与 token
 internal/webui/     go:embed 的 WebUI 产物
@@ -213,6 +256,7 @@ docker pull ghcr.io/leisurelyyrsc/onebotnoa:latest
 - [x] I7 元事件合成、本地应答（get_*/can_*/hub_*）、API 调试台、日志与审计页
 - [x] I8 HTTP 兼容层（上游 HTTP 上报 + 下游 HTTP API + 显式未实现的 quick-operation）
 - [x] I9 独立监听端口运行时热重建、TLS、部署产物与文档
+- [x] I10 连接信息拆分为生成的 `connect.json`（密钥本地加密、可导入导出），`config.yaml` 只留静态配置
 
 ## 文档
 

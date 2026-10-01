@@ -2,7 +2,6 @@ package transport
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -117,10 +116,10 @@ func TestActionPolicyDenyList(t *testing.T) {
 	env := newUpstreamEnv(t, func(cfg *config.Config) { cfg.OneBot.UpstreamWS.UnknownAccountPolicy = "auto" })
 	acc := env.createAccount(t, "70003")
 	bot, token := env.createBot(t, "restricted")
-	bot.ActionPolicy = []byte(`{"deny":["send_msg","set_group_*"]}`)
-	if err := env.store.UpdateBot(context.Background(), bot); err != nil {
-		t.Fatal(err)
-	}
+	// The policy is read when the connection is established, so it must be set
+	// before the Bot connects - the API does the same thing by refreshing every
+	// live connection after a change.
+	env.conns.setActionPolicy(bot.Name, `{"deny":["send_msg","set_group_*"]}`)
 	env.bind(t, bot.ID, acc.ID, true, "{}")
 
 	impl := env.dialImpl(t, "70003")
@@ -157,10 +156,7 @@ func TestActionPolicyAllowList(t *testing.T) {
 	env := newUpstreamEnv(t, func(cfg *config.Config) { cfg.OneBot.UpstreamWS.UnknownAccountPolicy = "auto" })
 	acc := env.createAccount(t, "70004")
 	bot, token := env.createBot(t, "whitelisted")
-	bot.ActionPolicy = []byte(`{"allow":["send_msg"]}`)
-	if err := env.store.UpdateBot(context.Background(), bot); err != nil {
-		t.Fatal(err)
-	}
+	env.conns.setActionPolicy(bot.Name, `{"allow":["send_msg"]}`)
 	env.bind(t, bot.ID, acc.ID, true, "{}")
 
 	impl := env.dialImpl(t, "70004")

@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
 
@@ -81,11 +80,8 @@ func (l *LocalService) OnConnect(ctx context.Context, conn *DownstreamConn) {
 		if !binding.Enabled {
 			continue
 		}
-		account, err := l.hub.store.AccountByID(ctx, binding.AccountID)
-		if err != nil {
-			continue
-		}
-		if !conn.wantsAccount(account.ID) {
+		account, ok := l.hub.conns.AccountBySelfID(binding.AccountSelfID)
+		if !ok || !conn.wantsAccount(account.SelfID) {
 			continue
 		}
 		conn.Send(l.lifecycle(account, "connect"))
@@ -101,8 +97,8 @@ func (l *LocalService) sendHeartbeat(conn *DownstreamConn) {
 		if !binding.Enabled {
 			continue
 		}
-		account, err := l.hub.store.AccountByID(context.Background(), binding.AccountID)
-		if err != nil || !conn.wantsAccount(account.ID) {
+		account, ok := l.hub.conns.AccountBySelfID(binding.AccountSelfID)
+		if !ok || !conn.wantsAccount(account.SelfID) {
 			continue
 		}
 		conn.Send(l.heartbeatFrame(account))
@@ -110,7 +106,7 @@ func (l *LocalService) sendHeartbeat(conn *DownstreamConn) {
 }
 
 // lifecycle builds a OneBot lifecycle meta event for one account.
-func (l *LocalService) lifecycle(account model.Account, subType string) []byte {
+func (l *LocalService) lifecycle(account Account, subType string) []byte {
 	frame := map[string]json.RawMessage{
 		"post_type":       json.RawMessage(strconv.Quote("meta_event")),
 		"meta_event_type": json.RawMessage(strconv.Quote("lifecycle")),
@@ -126,15 +122,15 @@ func (l *LocalService) lifecycle(account model.Account, subType string) []byte {
 }
 
 // heartbeatFrame reports the account's live state so frameworks show it right.
-func (l *LocalService) heartbeatFrame(account model.Account) []byte {
-	state := model.StatusOffline
+func (l *LocalService) heartbeatFrame(account Account) []byte {
+	state := StatusOffline
 	if session, ok := l.hub.Registry().Session(account.SelfID); ok {
 		state = session.State()
 	}
-	online := state == model.StatusOnline || state == model.StatusDegraded
+	online := state == StatusOnline || state == StatusDegraded
 	status, err := json.Marshal(map[string]any{
 		"online": online,
-		"good":   state == model.StatusOnline,
+		"good":   state == StatusOnline,
 		"state":  state,
 	})
 	if err != nil {
@@ -182,8 +178,8 @@ func (l *LocalService) HandleAction(ctx context.Context, conn *DownstreamConn, s
 		conn.Send(onebot.SuccessResponse(origEcho, []byte(`{"app_name":"OnebotNoa","protocol_version":"v11","app_version":"relay"}`)))
 		return true
 	case "get_login_info":
-		account, err := l.hub.store.AccountBySelfID(ctx, selfID)
-		if err != nil {
+		account, ok := l.hub.conns.AccountBySelfID(selfID)
+		if !ok {
 			return false
 		}
 		data, err := json.Marshal(map[string]json.RawMessage{
@@ -217,18 +213,18 @@ func (l *LocalService) HandleAction(ctx context.Context, conn *DownstreamConn, s
 // "online" flag covering every binding would let one offline account silently
 // mask another's failure.
 func (l *LocalService) statusData(ctx context.Context, conn *DownstreamConn, selfID string) []byte {
-	state := model.StatusOffline
+	state := StatusOffline
 	if session, ok := l.hub.Registry().Session(selfID); ok {
 		state = session.State()
 	}
-	online := state == model.StatusOnline || state == model.StatusDegraded
+	online := state == StatusOnline || state == StatusDegraded
 	payload := map[string]any{
-		"online": online,
-		"good":   state == model.StatusOnline,
-		"state":  state,
-		"self_id": selfID,
-		"app_name": "OnebotNoa",
-		"accounts": map[string]any{selfID: state},
+		"online":        online,
+		"good":          state == StatusOnline,
+		"state":         state,
+		"self_id":       selfID,
+		"app_name":      "OnebotNoa",
+		"accounts":      map[string]any{selfID: state},
 		"account_count": 1,
 	}
 	data, err := json.Marshal(payload)
@@ -240,11 +236,11 @@ func (l *LocalService) statusData(ctx context.Context, conn *DownstreamConn, sel
 
 // accountData describes one account (the hub_get_account extension).
 func (l *LocalService) accountData(ctx context.Context, selfID string) ([]byte, bool) {
-	account, err := l.hub.store.AccountBySelfID(ctx, selfID)
-	if err != nil {
+	account, ok := l.hub.conns.AccountBySelfID(selfID)
+	if !ok {
 		return nil, false
 	}
-	state := model.StatusOffline
+	state := StatusOffline
 	peers := 0
 	if session, ok := l.hub.Registry().Session(selfID); ok {
 		state = session.State()
@@ -270,11 +266,11 @@ func (l *LocalService) accountsData(conn *DownstreamConn) []byte {
 		if !binding.Enabled {
 			continue
 		}
-		account, err := l.hub.store.AccountByID(context.Background(), binding.AccountID)
-		if err != nil {
+		account, ok := l.hub.conns.AccountBySelfID(binding.AccountSelfID)
+		if !ok {
 			continue
 		}
-		state := model.StatusOffline
+		state := StatusOffline
 		if session, ok := l.hub.Registry().Session(account.SelfID); ok {
 			state = session.State()
 		}

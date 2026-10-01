@@ -33,6 +33,11 @@ export interface Account {
   peers: Peer[];
   binding_count: number;
   last_seen_at?: string;
+  // Endpoints answers "where does this instance connect?" and token/client_url
+  // carry the credential on the detail view, so the operator can copy both.
+  endpoints?: string[];
+  token?: string;
+  client_url?: string;
 }
 
 export interface PendingAccount {
@@ -56,6 +61,9 @@ export interface Bot {
   connections: number;
   binding_count: number;
   last_seen_at?: string;
+  endpoints?: string[];
+  token?: string;
+  client_url?: string;
 }
 
 export interface Scope {
@@ -281,8 +289,17 @@ export function systemStatus(): Promise<SystemStatus> {
 
 // ---------------------------------------------------------------- accounts
 
-export function listAccounts(): Promise<{ accounts: Account[]; pending: PendingAccount[] }> {
+export function listAccounts(): Promise<{
+  accounts: Account[];
+  pending: PendingAccount[];
+  file?: ConnectFileInfo;
+}> {
   return call("/api/v1/accounts");
+}
+
+// getAccount loads one account with its token and ready-to-paste address.
+export function getAccount(id: number): Promise<{ account: Account; bindings: unknown[] }> {
+  return call("/api/v1/accounts/" + id);
 }
 
 export function createAccount(selfId: string, name: string): Promise<{ account: Account }> {
@@ -317,6 +334,11 @@ export function rejectPending(id: string): Promise<{ rejected: string }> {
 
 export function listBots(): Promise<{ bots: Bot[] }> {
   return call("/api/v1/bots");
+}
+
+// getBot loads one Bot with its token and connection URLs.
+export function getBot(id: number): Promise<{ bot: Bot; bindings: unknown[] }> {
+  return call("/api/v1/bots/" + id);
 }
 
 export function createBot(name: string, note: string): Promise<{ bot: Bot; token: string; hint: string }> {
@@ -443,6 +465,104 @@ export function deleteEndpoint(id: number): Promise<{ deleted: string; endpoints
 
 export function reconnectEndpoint(name: string): Promise<{ reconnecting: string }> {
   return call("/api/v1/endpoints/" + encodeURIComponent(name) + "/reconnect", { method: "POST" });
+}
+
+// ------------------------------------------------------------- connect.json
+
+// ConnectAccount mirrors the account row inside connect.json. The file is the
+// source of truth for connections, so this shape carries what the document
+// holds plus the live fields the API joins onto it.
+export interface ConnectAccount {
+  id: number;
+  self_id: string;
+  name?: string;
+  nickname?: string;
+  enabled: boolean;
+  tags?: string[];
+  source?: string;
+  note?: string;
+  grant?: { token_hint?: string; rotated_at?: string; sealed?: boolean };
+}
+
+export interface ConnectBot {
+  id: number;
+  name: string;
+  enabled: boolean;
+  note?: string;
+  rate_limit?: unknown;
+  action_policy?: unknown;
+  grant?: { token_hint?: string; rotated_at?: string; sealed?: boolean };
+}
+
+export interface ConnectConnection {
+  id: number;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  addr?: string;
+  url?: string;
+  path?: string;
+  mode?: string;
+  account_self_id?: string;
+  bot_name?: string;
+  fixed_self_id?: string;
+  tls_cert?: string;
+  reconnect?: { min?: string; max?: string; jitter?: number };
+  grant?: { token_hint?: string; sealed?: boolean };
+}
+
+export interface ConnectBinding {
+  id: number;
+  bot_name: string;
+  account_self_id: string;
+  priority: number;
+  is_default: boolean;
+  enabled: boolean;
+  scope?: Scope;
+}
+
+export interface ConnectDocument {
+  schema_version: number;
+  generated_by?: string;
+  updated_at?: string;
+  server?: Record<string, string>;
+  accounts: ConnectAccount[];
+  bots: ConnectBot[];
+  connections: ConnectConnection[];
+  bindings: ConnectBinding[];
+}
+
+export interface ConnectFileInfo {
+  path?: string;
+  note?: string;
+  last_error?: string;
+}
+
+export function getConnections(): Promise<{ connect: ConnectDocument; path: string; note: string }> {
+  return call("/api/v1/connect");
+}
+
+export function putConnections(doc: ConnectDocument): Promise<{ connect: ConnectDocument; note: string }> {
+  return call("/api/v1/connect", { method: "PUT", body: JSON.stringify({ connect: doc }) });
+}
+
+export interface DirectConnect {
+  kind: string;
+  self_id?: string;
+  bot_name?: string;
+  token?: string;
+  has_token?: boolean;
+  endpoints?: string[];
+  urls?: string[];
+  headers?: Record<string, string>;
+  hint?: string;
+}
+
+export function directConnect(
+  kind: "account" | "bot",
+  id: number,
+): Promise<DirectConnect> {
+  return call("/api/v1/connect/" + kind + "/" + id);
 }
 
 // ---------------------------------------------------------------- listeners

@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -18,7 +17,6 @@ import (
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
 
 // EndpointSpec is one relay-dialed connection, from config.yaml or the database.
@@ -129,7 +127,7 @@ func (w *dialWorker) closePeers(reason string) {
 // DialManager owns every outbound connection of the hub.
 type DialManager struct {
 	cfg    *config.Config
-	store  *store.Store
+	conns  ConnStore
 	hub    *hub.Hub
 	logger *slog.Logger
 	dialer websocket.Dialer
@@ -141,14 +139,15 @@ type DialManager struct {
 	ctx     context.Context
 }
 
-// NewDialManager builds the manager.
-func NewDialManager(cfg *config.Config, st *store.Store, relay *hub.Hub, logger *slog.Logger) *DialManager {
+// NewDialManager builds the manager. conns is connect.json, which owns the
+// dial targets and their credentials.
+func NewDialManager(cfg *config.Config, conns ConnStore, relay *hub.Hub, logger *slog.Logger) *DialManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &DialManager{
 		cfg:     cfg,
-		store:   st,
+		conns:   conns,
 		hub:     relay,
 		logger:  logger,
 		workers: map[string]*dialWorker{},
@@ -227,11 +226,10 @@ func (m *DialManager) Apply(specs []EndpointSpec) {
 	}
 }
 
-// Reload re-reads config.yaml plus the database and applies the result; the API
-// calls it after an endpoint changes.
+// Reload re-reads connect.json and applies the result; the API calls it after a
+// connection changes.
 func (m *DialManager) Reload(ctx context.Context) {
-	specs := LoadEndpointSpecs(ctx, m.cfg, m.store, m.logger)
-	m.Apply(specs)
+	m.Apply(LoadEndpointSpecs(m.conns, m.logger))
 }
 
 // States returns the runtime view of every endpoint, sorted by name.
@@ -421,15 +419,9 @@ func (m *DialManager) dialUpstreamSplit(ctx context.Context, worker *dialWorker)
 }
 
 func (m *DialManager) dialDownstream(ctx context.Context, worker *dialWorker) (bool, error) {
-	if worker.spec.BotID == 0 {
+	bot, found := m.conns.BotByName(worker.spec.BotName)
+	if !found {
 		return false, fmt.Errorf("bot %q does not exist yet: create it in the WebUI first", worker.spec.BotName)
-	}
-	bot, err := m.store.BotByID(ctx, worker.spec.BotID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return false, fmt.Errorf("bot %d no longer exists", worker.spec.BotID)
-		}
-		return false, err
 	}
 	if !bot.Enabled {
 		return false, fmt.Errorf("bot %s is disabled", bot.Name)
@@ -461,7 +453,10 @@ func (m *DialManager) dialDownstream(ctx context.Context, worker *dialWorker) (b
 
 	worker.setState("online", "")
 	info := hub.DownstreamInfo{
-		Bot:              bot,
+		Bot: hub.Bot{
+			ID: bot.ID, Name: bot.Name, Enabled: bot.Enabled,
+			RateLimit: bot.RateLimit, ActionPolicy: bot.ActionPolicy,
+		},
 		FixedSelfID:      worker.spec.FixedSelfID,
 		RemoteAddr:       conn.RemoteAddr().String(),
 		UserAgent:        "OnebotNoa",

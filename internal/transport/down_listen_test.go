@@ -2,7 +2,6 @@ package transport
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
@@ -22,37 +20,45 @@ import (
 
 func (e *upstreamEnv) createAccount(t *testing.T, selfID string) model.Account {
 	t.Helper()
-	acc, err := e.store.CreateAccount(context.Background(), selfID, "acc-"+selfID, "test")
-	if err != nil {
-		t.Fatalf("create account: %v", err)
-	}
-	return acc
+	account := e.conns.addAccount(selfID)
+	return model.Account{ID: account.ID, SelfID: account.SelfID, Name: "acc-" + selfID, Enabled: true}
 }
 
+// createBot registers a Bot and returns it with a token the tests can present.
 func (e *upstreamEnv) createBot(t *testing.T, name string) (model.Bot, string) {
 	t.Helper()
-	plain, hash, err := auth.NewToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bot, err := e.store.CreateBot(context.Background(), name, hash, "")
-	if err != nil {
-		t.Fatalf("create bot: %v", err)
-	}
-	return bot, plain
+	token := "bot-token-" + name
+	bot := e.conns.addBot(name)
+	e.conns.setBotToken(name, token)
+	return model.Bot{ID: bot.ID, Name: bot.Name, Enabled: true}, token
 }
 
+// bind grants an account to a Bot. The numeric ids are accepted for readability
+// at the call sites and resolved back to names.
 func (e *upstreamEnv) bind(t *testing.T, botID, accountID int64, isDefault bool, scope string) model.Binding {
 	t.Helper()
-	b, err := e.store.CreateBinding(context.Background(), model.Binding{
-		BotID: botID, AccountID: accountID, Priority: 100, IsDefault: isDefault,
-		Enabled: true, Scope: json.RawMessage(scope),
-	})
-	if err != nil {
-		t.Fatalf("create binding: %v", err)
+	botName := ""
+	for _, bot := range e.conns.bots {
+		if bot.ID == botID {
+			botName = bot.Name
+		}
 	}
+	selfID := ""
+	for _, account := range e.conns.accounts {
+		if account.ID == accountID {
+			selfID = account.SelfID
+		}
+	}
+	if botName == "" || selfID == "" {
+		t.Fatalf("bind: unknown bot %d / account %d", botID, accountID)
+	}
+	binding := e.conns.addBinding(botName, selfID, isDefault, scope)
 	e.hub.InvalidateBindings()
-	return b
+	return model.Binding{
+		ID:    e.conns.bindingRefID(binding.BotName, binding.AccountSelfID),
+		BotID: botID, AccountID: accountID, IsDefault: isDefault,
+		Enabled: true, Scope: json.RawMessage(scope),
+	}
 }
 
 // fakeImpl is a QQ-side implementation connected to the upstream endpoint.
@@ -605,11 +611,8 @@ func TestDownstreamRequiresValidToken(t *testing.T) {
 	}
 
 	// A disabled Bot is refused with 403.
-	bot, token := env.createBot(t, "disabled-bot")
-	bot.Enabled = false
-	if err := env.store.UpdateBot(context.Background(), bot); err != nil {
-		t.Fatal(err)
-	}
+	_, token := env.createBot(t, "disabled-bot")
+	env.conns.disableBot("disabled-bot")
 	_, resp, err = env.dial(t, "/onebot/v11/bot/ws/"+token, nil)
 	if err == nil {
 		t.Fatal("dial for a disabled bot must fail")

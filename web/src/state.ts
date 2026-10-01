@@ -11,7 +11,8 @@ export type PageId =
   | "console"
   | "logs"
   | "listeners"
-  | "endpoints";
+  | "endpoints"
+  | "connections";
 
 export interface AppState {
   user: User | null;

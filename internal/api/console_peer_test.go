@@ -32,14 +32,14 @@ func newConsolePeerForTest(id, selfID string) *consoleTestPeer {
 	}
 }
 
-func (p *consoleTestPeer) ID() string               { return p.id }
-func (p *consoleTestPeer) Kind() string             { return "upstream" }
-func (p *consoleTestPeer) Role() onebot.Role        { return p.role }
-func (p *consoleTestPeer) SelfID() string           { return p.selfID }
-func (p *consoleTestPeer) RemoteAddr() string       { return "test" }
-func (p *consoleTestPeer) TokenFingerprint() string { return "" }
-func (p *consoleTestPeer) UserAgent() string        { return "test" }
-func (p *consoleTestPeer) Label() string            { return "test/" + p.id }
+func (p *consoleTestPeer) ID() string                        { return p.id }
+func (p *consoleTestPeer) Kind() string                      { return "upstream" }
+func (p *consoleTestPeer) Role() onebot.Role                 { return p.role }
+func (p *consoleTestPeer) SelfID() string                    { return p.selfID }
+func (p *consoleTestPeer) RemoteAddr() string                { return "test" }
+func (p *consoleTestPeer) TokenFingerprint() string          { return "" }
+func (p *consoleTestPeer) UserAgent() string                 { return "test" }
+func (p *consoleTestPeer) Label() string                     { return "test/" + p.id }
 func (p *consoleTestPeer) SetReadDeadlineOverride(time.Time) {}
 func (p *consoleTestPeer) WriteLoop()                        {}
 func (p *consoleTestPeer) Queued() int64                     { return int64(len(p.outbox)) }

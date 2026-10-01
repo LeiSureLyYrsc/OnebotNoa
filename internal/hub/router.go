@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
 
@@ -30,8 +29,22 @@ func NewRouter(h *Hub, actions *ActionRouter, logger *slog.Logger) *Router {
 // The frame bytes are forwarded untouched: they already carry self_id, so a Bot
 // with several bound accounts can tell them apart without any injected field.
 func (r *Router) RouteEvent(session *AccountSession, meta onebot.EventMeta, raw []byte) {
-	account := session.Account()
-	bindings := r.hub.bindingsForAccount(context.Background(), account.ID)
+	r.deliver(session.Account().SelfID, meta, raw)
+}
+
+// RouteEventBySelfID multicasts an event whose sender has no live session (for
+// example an event delivered over HTTP).
+func (r *Router) RouteEventBySelfID(selfID string, meta onebot.EventMeta, raw []byte) {
+	if _, ok := r.hub.conns.AccountBySelfID(selfID); !ok {
+		r.logger.Warn("event from an unknown account was dropped", "self_id", selfID)
+		return
+	}
+	r.deliver(selfID, meta, raw)
+}
+
+// deliver multicasts one event to every Bot bound to selfID.
+func (r *Router) deliver(selfID string, meta onebot.EventMeta, raw []byte) {
+	bindings := r.hub.bindingsForAccount(selfID)
 	if len(bindings) == 0 {
 		return
 	}
@@ -50,7 +63,7 @@ func (r *Router) RouteEvent(session *AccountSession, meta onebot.EventMeta, raw 
 			continue
 		}
 		for _, conn := range r.hub.DownstreamsForBot(b.BotID) {
-			if !conn.wantsAccount(account.ID) {
+			if !conn.wantsAccount(selfID) {
 				continue
 			}
 			if conn.Send(raw) {
@@ -59,39 +72,7 @@ func (r *Router) RouteEvent(session *AccountSession, meta onebot.EventMeta, raw 
 		}
 	}
 	if delivered == 0 {
-		r.logger.Debug("event had no subscriber", "self_id", account.SelfID, "post_type", meta.PostType)
-	}
-}
-
-// RouteEventBySelfID multicasts an event whose sender has no live session (for
-// example an event delivered over HTTP).
-func (r *Router) RouteEventBySelfID(selfID string, meta onebot.EventMeta, raw []byte) {
-	account, err := r.hub.store.AccountBySelfID(context.Background(), selfID)
-	if err != nil {
-		r.logger.Warn("event from an unknown account was dropped", "self_id", selfID)
-		return
-	}
-	bindings := r.hub.bindingsForAccount(context.Background(), account.ID)
-	if len(bindings) == 0 {
-		return
-	}
-	for _, b := range bindings {
-		if !b.Enabled {
-			continue
-		}
-		scope, err := ParseScope(b.Scope)
-		if err != nil {
-			continue
-		}
-		if !scope.Match(meta, r.hub.cfg.Policy.MetaEvents) {
-			continue
-		}
-		for _, conn := range r.hub.DownstreamsForBot(b.BotID) {
-			if !conn.wantsAccount(account.ID) {
-				continue
-			}
-			conn.Send(raw)
-		}
+		r.logger.Debug("event had no subscriber", "self_id", selfID, "post_type", meta.PostType)
 	}
 }
 
@@ -103,47 +84,39 @@ func (r *Router) RouteActionResult(_ *AccountSession, _ Peer, raw []byte) {
 // wantsAccount reports whether this connection subscribes to an account. The
 // transparent single-account view is deliberately blind to every other account
 // bound to the same Bot.
-func (c *DownstreamConn) wantsAccount(accountID int64) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+func (c *DownstreamConn) wantsAccount(selfID string) bool {
 	if c.fixedSelfID != "" {
-		return accountID == c.fixedAccountID
+		return selfID == c.fixedSelfID
 	}
-	b, ok := c.bindings[accountID]
-	return ok && b.Enabled
+	_, ok := c.bindingFor(selfID)
+	return ok
 }
 
 // ------------------------------------------------------------ binding cache
 
 // bindingsForAccount serves the account -> bindings lookup from a short-lived
-// cache so the per-event path never hits SQLite. Cache entries are invalidated
-// whenever the management API changes a binding.
-func (h *Hub) bindingsForAccount(ctx context.Context, accountID int64) []model.Binding {
+// cache. The per-event path is the hottest path in the process, so it must not
+// re-scan connect.json for every frame; cache entries are invalidated whenever
+// the management API changes a grant.
+func (h *Hub) bindingsForAccount(selfID string) []JBinding {
 	h.bindingMu.RLock()
 	if h.bindingCache != nil && time.Since(h.bindingLoaded) < bindingCacheTTL {
-		out := h.bindingCache[accountID]
+		out := h.bindingCache[selfID]
 		h.bindingMu.RUnlock()
 		return out
 	}
 	h.bindingMu.RUnlock()
 
-	rows, err := h.store.ListBindings(ctx)
-	if err != nil {
-		h.logger.Warn("could not load bindings", "error", err)
-		h.bindingMu.RLock()
-		out := h.bindingCache[accountID]
-		h.bindingMu.RUnlock()
-		return out
-	}
-	cache := map[int64][]model.Binding{}
+	rows := h.conns.Bindings()
+	cache := map[string][]JBinding{}
 	for _, b := range rows {
-		cache[b.AccountID] = append(cache[b.AccountID], b)
+		cache[b.AccountSelfID] = append(cache[b.AccountSelfID], b)
 	}
 	h.bindingMu.Lock()
 	h.bindingCache = cache
 	h.bindingLoaded = time.Now()
 	h.bindingMu.Unlock()
-	return cache[accountID]
+	return cache[selfID]
 }
 
 // InvalidateBindings forces the next lookup to reload from the store.

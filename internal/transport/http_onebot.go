@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
 
@@ -47,8 +45,8 @@ func (d *DataPlane) handleHTTPAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing token", http.StatusUnauthorized)
 		return
 	}
-	bot, err := d.store.BotByTokenHash(r.Context(), auth.HashToken(token))
-	if err != nil {
+	bot, found := d.conns.BotByToken(token)
+	if !found {
 		http.Error(w, "unknown token", http.StatusUnauthorized)
 		return
 	}
@@ -81,7 +79,7 @@ func (d *DataPlane) handleHTTPAPI(w http.ResponseWriter, r *http.Request) {
 
 	// A Bot must not be able to reach an account it is not bound to, even over
 	// HTTP: mirror the WebSocket rule.
-	if !d.botMayUseAccount(r, bot, selfID) {
+	if !d.botMayUseAccount(bot, selfID) {
 		writeOneBotFailure(w, frame.Echo, onebot.RetForbidden, "账号 "+selfID+" 未授权给当前 Bot")
 		return
 	}
@@ -147,7 +145,7 @@ func (d *DataPlane) handleHTTPReport(w http.ResponseWriter, r *http.Request) {
 	if d.cfg.OneBot.UpstreamWS.RequireToken {
 		bound := ""
 		if token != "" {
-			if account, err := d.store.AccountByTokenHash(r.Context(), auth.HashToken(token)); err == nil {
+			if account, found := d.conns.AccountByToken(token); found {
 				bound = account.SelfID
 			}
 		}
@@ -185,7 +183,7 @@ func (d *DataPlane) handleQuickOperation(w http.ResponseWriter, r *http.Request)
 }
 
 // resolveHTTPTarget applies the same precedence as the WebSocket path.
-func (d *DataPlane) resolveHTTPTarget(r *http.Request, bot model.Bot, frame onebot.ActionFrame) (string, error) {
+func (d *DataPlane) resolveHTTPTarget(r *http.Request, bot BotRef, frame onebot.ActionFrame) (string, error) {
 	if selfID := frame.SelfID.String(); selfID != "" {
 		return selfID, nil
 	}
@@ -199,28 +197,23 @@ func (d *DataPlane) resolveHTTPTarget(r *http.Request, bot model.Bot, frame oneb
 		return selfID, nil
 	}
 
-	bindings, err := d.store.BindingsByBot(r.Context(), bot.ID)
-	if err != nil {
-		return "", errResource("读取绑定失败")
-	}
-	enabled := []model.Binding{}
+	bindings := d.conns.BindingsByBot(bot.Name)
+	enabled := []BindingRef{}
 	for _, binding := range bindings {
 		if binding.Enabled {
 			enabled = append(enabled, binding)
 		}
 	}
 	if len(enabled) == 1 {
-		account, err := d.store.AccountByID(r.Context(), enabled[0].AccountID)
-		if err != nil {
+		if _, ok := d.conns.AccountBySelfID(enabled[0].AccountSelfID); !ok {
 			return "", errResource("绑定账号不存在")
 		}
-		return account.SelfID, nil
+		return enabled[0].AccountSelfID, nil
 	}
 	for _, binding := range enabled {
 		if binding.IsDefault {
-			account, err := d.store.AccountByID(r.Context(), binding.AccountID)
-			if err == nil {
-				return account.SelfID, nil
+			if _, ok := d.conns.AccountBySelfID(binding.AccountSelfID); ok {
+				return binding.AccountSelfID, nil
 			}
 		}
 	}
@@ -228,16 +221,12 @@ func (d *DataPlane) resolveHTTPTarget(r *http.Request, bot model.Bot, frame oneb
 }
 
 // botMayUseAccount reports whether a Bot is bound to an account.
-func (d *DataPlane) botMayUseAccount(r *http.Request, bot model.Bot, selfID string) bool {
-	account, err := d.store.AccountBySelfID(r.Context(), selfID)
-	if err != nil {
+func (d *DataPlane) botMayUseAccount(bot BotRef, selfID string) bool {
+	if _, ok := d.conns.AccountBySelfID(selfID); !ok {
 		return false
 	}
-	binding, err := d.store.BindingByPair(r.Context(), bot.ID, account.ID)
-	if err != nil {
-		return false
-	}
-	return binding.Enabled
+	binding, ok := d.conns.BindingByPair(bot.Name, selfID)
+	return ok && binding.Enabled
 }
 
 type errResource string

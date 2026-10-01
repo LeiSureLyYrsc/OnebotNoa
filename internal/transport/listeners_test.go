@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,8 +13,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 )
 
 // freeAddr reserves a loopback port for the duration of a test.
@@ -32,7 +29,7 @@ func freeAddr(t *testing.T) string {
 
 func newListenerManager(t *testing.T, env *upstreamEnv) *ListenerManager {
 	t.Helper()
-	manager := NewListenerManager(env.cfg, env.store, env.dp, slog.New(slog.DiscardHandler))
+	manager := NewListenerManager(env.cfg, env.conns, env.dp, slog.New(slog.DiscardHandler))
 	manager.Start(env.ctx, nil)
 	t.Cleanup(manager.Stop)
 	return manager
@@ -230,72 +227,59 @@ func TestListenerValidationRejectsIncompleteSpecs(t *testing.T) {
 	}
 }
 
-// TestLoadListenerSpecsMergesConfigAndDatabase mirrors the endpoint loader.
-func TestLoadListenerSpecsMergesConfigAndDatabase(t *testing.T) {
-	ctx := context.Background()
+// TestLoadListenerSpecsReadsTheConnectionFile covers the listener half of the
+// loader: only listen kinds, Bot names resolved, and the dial entries ignored.
+func TestLoadListenerSpecsReadsTheConnectionFile(t *testing.T) {
 	env := newUpstreamEnv(t, nil)
-
 	account := env.createAccount(t, "95006")
 	bot, _ := env.createBot(t, "listener-bot")
 
-	cfg := config.Default()
-	enabled := true
-	cfg.Dedicated = []config.Listener{
-		{Name: "from-config", Kind: config.KindUpstreamListen, Addr: "127.0.0.1:0", AccountSelfID: "95006", Enabled: &enabled},
-	}
-	if _, err := env.store.CreateListener(ctx, model.Listener{
-		Name: "from-db", Kind: config.KindDownstreamListen, BindAddr: "127.0.0.1:0",
-		Path: "/onebot/v11/bot/ws", BotID: &bot.ID, Enabled: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	accountID := account.ID
-	if _, err := env.store.CreateListener(ctx, model.Listener{
-		Name: "by-account-id", Kind: config.KindUpstreamListen, BindAddr: "127.0.0.1:0",
-		AccountID: &accountID, Enabled: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	env.conns.addConnection(ConnectionRef{
+		Name: "from-file", Kind: config.KindUpstreamListen, Addr: "127.0.0.1:0",
+		Path: "/onebot/v11/ws", AccountSelfID: account.SelfID, Enabled: true,
+	})
+	env.conns.addConnection(ConnectionRef{
+		Name: "bot-listener", Kind: config.KindDownstreamListen, Addr: "127.0.0.1:0",
+		Path: "/onebot/v11/bot/ws", BotName: bot.Name, Enabled: true,
+	})
+	// A dial target belongs to the dial manager, not here.
+	env.conns.addConnection(ConnectionRef{
+		Name: "dial-away", Kind: config.KindUpstreamDial, URL: "ws://127.0.0.1:6700/", Enabled: true,
+	})
 
-	specs := LoadListenerSpecs(ctx, cfg, env.store, slog.New(slog.DiscardHandler))
+	specs := LoadListenerSpecs(env.conns, slog.New(slog.DiscardHandler))
 	byName := map[string]ListenerSpec{}
 	for _, spec := range specs {
 		byName[spec.Name] = spec
 	}
-	if len(specs) != 3 {
-		t.Fatalf("specs = %d, want 3: %+v", len(specs), specs)
+	if len(specs) != 2 {
+		t.Fatalf("specs = %d, want 2 (listen kinds only): %+v", len(specs), specs)
 	}
-	if spec := byName["from-config"]; spec.Source != "config" || spec.AccountHint != "95006" {
-		t.Fatalf("config listener not carried over: %+v", spec)
+	if _, ok := byName["dial-away"]; ok {
+		t.Fatal("a dial target must not become a listener")
 	}
-	if spec := byName["from-db"]; spec.BotID != bot.ID || spec.BotName != bot.Name {
-		t.Fatalf("Bot not resolved: %+v", spec)
+	if spec := byName["from-file"]; spec.Source != SourceFile || spec.AccountHint != account.SelfID {
+		t.Fatalf("listener not carried over: %+v", spec)
 	}
-	// An account referenced by id is resolved to its self_id for the runtime.
-	if spec := byName["by-account-id"]; spec.AccountHint != account.SelfID {
-		t.Fatalf("account id not resolved: %+v", spec)
+	if spec := byName["bot-listener"]; spec.BotID != bot.ID || spec.BotName != bot.Name {
+		t.Fatalf("Bot name not resolved: %+v", spec)
 	}
 }
 
-func TestListenerSpecsFromTheStoreUseAddressAndPath(t *testing.T) {
-	ctx := context.Background()
+func TestListenerSpecsCarryAddressAndPath(t *testing.T) {
 	env := newUpstreamEnv(t, nil)
 	account := env.createAccount(t, "95007")
 
-	accountID := account.ID
-	created, err := env.store.CreateListener(ctx, model.Listener{
-		Name: "store-driven", Kind: config.KindUpstreamListen, BindAddr: "127.0.0.1:0",
-		Path: "/custom", AccountID: &accountID, Enabled: true,
+	created := env.conns.addConnection(ConnectionRef{
+		Name: "file-driven", Kind: config.KindUpstreamListen, Addr: "127.0.0.1:0",
+		Path: "/custom", AccountSelfID: account.SelfID, Enabled: true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	specs := LoadListenerSpecs(ctx, config.Default(), env.store, slog.New(slog.DiscardHandler))
+	specs := LoadListenerSpecs(env.conns, slog.New(slog.DiscardHandler))
 	if len(specs) != 1 {
 		t.Fatalf("specs = %+v", specs)
 	}
 	if specs[0].DBID != created.ID || specs[0].Addr != "127.0.0.1:0" || specs[0].Path != "/custom" {
-		t.Fatalf("stored listener not mapped: %+v", specs[0])
+		t.Fatalf("listener not mapped: %+v", specs[0])
 	}
 }
 
@@ -329,5 +313,4 @@ func portOpen(t *testing.T, addr string) bool {
 }
 
 var _ = json.Marshal
-var _ = store.ErrNotFound
 var _ = fmt.Sprintf

@@ -15,6 +15,9 @@ import (
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/connect"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/connstore"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/cryptobox"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
@@ -25,6 +28,7 @@ type testAPI struct {
 	ts     *httptest.Server
 	http   *http.Client
 	st     *store.Store
+	conns  *connect.Store
 	hub    *hub.Hub
 	events *hub.EventLog
 	srv    *Server
@@ -38,8 +42,9 @@ func newTestAPI(t *testing.T) *testAPI {
 func newTestAPIWith(t *testing.T, mutate func(*config.Config)) *testAPI {
 	t.Helper()
 	ctx := context.Background()
+	dir := t.TempDir()
 
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "api.db"))
+	st, err := store.Open(ctx, filepath.Join(dir, "api.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -53,18 +58,33 @@ func newTestAPIWith(t *testing.T, mutate func(*config.Config)) *testAPI {
 		t.Fatal(err)
 	}
 
+	// The connection document is a real file: the API seals secrets into it and
+	// the tests assert on what lands there, so a double would hide the point.
+	key, err := cryptobox.LoadOrCreateKey(filepath.Join(dir, "connect.json.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := cryptobox.NewBox(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns, err := connect.Open(filepath.Join(dir, "connect.json"), box)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	logger := slog.New(slog.DiscardHandler)
 	manager := auth.NewManager(st, time.Hour, logger)
 	cfg := config.Default()
 	if mutate != nil {
 		mutate(cfg)
 	}
-	relay := hub.New(cfg, st, logger)
+	relay := hub.New(cfg, st, connstore.New(conns), logger)
 	events := hub.NewEventLog(64)
 	relay.SetObserver(events)
 	relay.Actions().SetTrafficObserver(events)
 	srv := New(Options{
-		Store: st, Auth: manager, Logger: logger, Config: cfg,
+		Store: st, Connections: conns, Auth: manager, Logger: logger, Config: cfg,
 		Hub: relay, Events: events,
 		Version: "test-version", StartedAt: time.Now().Add(-time.Minute),
 	})
@@ -82,6 +102,7 @@ func newTestAPIWith(t *testing.T, mutate func(*config.Config)) *testAPI {
 		ts:     ts,
 		http:   &http.Client{Jar: jar, Timeout: 5 * time.Second},
 		st:     st,
+		conns:  conns,
 		hub:    relay,
 		events: events,
 		srv:    srv,
@@ -111,6 +132,43 @@ func (a *testAPI) do(t *testing.T, method, path, body string, headers map[string
 		_ = json.NewDecoder(res.Body).Decode(&payload)
 	}
 	return res, payload
+}
+
+// seedAccount creates a QQ instance directly in the document (no HTTP).
+func (a *testAPI) seedAccount(t *testing.T, selfID, name string) connect.Account {
+	t.Helper()
+	account, err := a.conns.CreateAccount(selfID, name, "test")
+	if err != nil {
+		t.Fatalf("seed account %s: %v", selfID, err)
+	}
+	return account
+}
+
+// seedBot creates a downstream application with a known token.
+func (a *testAPI) seedBot(t *testing.T, name, token string) connect.Bot {
+	t.Helper()
+	bot, err := a.conns.CreateBotWithToken(name, token, token, "")
+	if err != nil {
+		t.Fatalf("seed bot %s: %v", name, err)
+	}
+	return bot
+}
+
+// seedBinding grants an account to a Bot.
+func (a *testAPI) seedBinding(t *testing.T, botName, selfID string, isDefault bool, scope string) connect.Binding {
+	t.Helper()
+	binding := connect.Binding{BotName: botName, AccountSelfID: selfID, IsDefault: isDefault, Enabled: true}
+	if strings.TrimSpace(scope) != "" {
+		if err := json.Unmarshal([]byte(scope), &binding.Scope); err != nil {
+			t.Fatalf("seed binding scope: %v", err)
+		}
+	}
+	created, err := a.conns.CreateBinding(binding)
+	if err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	a.hub.InvalidateBindings()
+	return created
 }
 
 func TestLoginFlowAndCSRF(t *testing.T) {

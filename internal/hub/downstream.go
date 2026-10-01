@@ -9,13 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
 
 // DownstreamInfo describes an authenticated Bot connection.
 type DownstreamInfo struct {
-	Bot              model.Bot
+	Bot              Bot
 	FixedSelfID      string
 	RemoteAddr       string
 	UserAgent        string
@@ -27,17 +26,19 @@ type DownstreamInfo struct {
 // map and resolves which account an action targets.
 type DownstreamConn struct {
 	id          string
-	bot         model.Bot
+	bot         Bot
 	peer        Peer
 	fixedSelfID string
 	router      *ActionRouter
 	hub         *Hub
 	logger      *slog.Logger
 
-	mu             sync.RWMutex
-	bindings       map[int64]model.Binding
-	fixedAccountID int64
-	connected      time.Time
+	// bindings is keyed by self_id, not by a database id: that is the identity
+	// the wire actually carries, and it keeps a Bot's view correct even if the
+	// account rows are renumbered by a hand-edit of connect.json.
+	mu        sync.RWMutex
+	bindings  map[string]JBinding
+	connected time.Time
 }
 
 func newDownstreamConn(id string, info DownstreamInfo, peer Peer, router *ActionRouter, h *Hub, logger *slog.Logger) *DownstreamConn {
@@ -49,7 +50,7 @@ func newDownstreamConn(id string, info DownstreamInfo, peer Peer, router *Action
 		router:      router,
 		hub:         h,
 		logger:      logger.With("bot", info.Bot.Name, "conn", id),
-		bindings:    map[int64]model.Binding{},
+		bindings:    map[string]JBinding{},
 		connected:   time.Now(),
 	}
 }
@@ -57,8 +58,8 @@ func newDownstreamConn(id string, info DownstreamInfo, peer Peer, router *Action
 // ID returns the connection id.
 func (c *DownstreamConn) ID() string { return c.id }
 
-// Bot returns the authenticated Bot row.
-func (c *DownstreamConn) Bot() model.Bot { return c.bot }
+// Bot returns the authenticated Bot.
+func (c *DownstreamConn) Bot() Bot { return c.bot }
 
 // FixedSelfID is non-empty for the transparent single-account view.
 func (c *DownstreamConn) FixedSelfID() string { return c.fixedSelfID }
@@ -79,30 +80,28 @@ func (c *DownstreamConn) Queued() int64 { return c.peer.Queued() }
 func (c *DownstreamConn) Dropped() int64 { return c.peer.Dropped() }
 
 // Bindings returns a copy of the account grants.
-func (c *DownstreamConn) Bindings() []model.Binding {
+func (c *DownstreamConn) Bindings() []JBinding {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out := make([]model.Binding, 0, len(c.bindings))
+	out := make([]JBinding, 0, len(c.bindings))
 	for _, b := range c.bindings {
 		out = append(out, b)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].AccountID < out[j].AccountID })
+	sort.Slice(out, func(i, j int) bool { return out[i].AccountSelfID < out[j].AccountSelfID })
 	return out
 }
 
-// ReloadBindings refreshes the account grants from the store.
+// ReloadBindings refreshes the account grants from connect.json.
 func (c *DownstreamConn) ReloadBindings(ctx context.Context) error {
-	rows, err := c.hub.store.BindingsByBot(ctx, c.bot.ID)
-	if err != nil {
-		return err
-	}
-	next := make(map[int64]model.Binding, len(rows))
+	rows := c.hub.conns.BindingsByBot(c.bot.Name)
+	next := make(map[string]JBinding, len(rows))
 	for _, b := range rows {
-		acc, err := c.hub.store.AccountByID(ctx, b.AccountID)
-		if err != nil {
+		if _, ok := c.hub.conns.AccountBySelfID(b.AccountSelfID); !ok {
+			// A grant that names a deleted account is dropped rather than kept as
+			// a dangling permission.
 			continue
 		}
-		next[acc.ID] = b
+		next[b.AccountSelfID] = b
 	}
 	c.mu.Lock()
 	c.bindings = next
@@ -110,25 +109,21 @@ func (c *DownstreamConn) ReloadBindings(ctx context.Context) error {
 	return nil
 }
 
-func (c *DownstreamConn) bindingFor(selfID string) (model.Binding, bool) {
-	acc, err := c.hub.store.AccountBySelfID(context.Background(), selfID)
-	if err != nil {
-		return model.Binding{}, false
-	}
+func (c *DownstreamConn) bindingFor(selfID string) (JBinding, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	b, ok := c.bindings[acc.ID]
+	b, ok := c.bindings[selfID]
 	if !ok || !b.Enabled {
-		return model.Binding{}, false
+		return JBinding{}, false
 	}
 	return b, true
 }
 
-func (c *DownstreamConn) defaultBinding() (model.Binding, bool) {
+func (c *DownstreamConn) defaultBinding() (JBinding, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	var (
-		fallback model.Binding
+		fallback JBinding
 		found    bool
 	)
 	for _, b := range c.bindings {
@@ -145,7 +140,7 @@ func (c *DownstreamConn) defaultBinding() (model.Binding, bool) {
 	if found && len(c.bindings) == 1 {
 		return fallback, true
 	}
-	return model.Binding{}, false
+	return JBinding{}, false
 }
 
 // ResolveTarget implements the documented precedence:
@@ -158,13 +153,11 @@ func (c *DownstreamConn) defaultBinding() (model.Binding, bool) {
 //
 // An explicit target that is not bound to this Bot is refused with 1403 so a
 // Bot can never silently reach a foreign account.
-func (c *DownstreamConn) ResolveTarget(frame onebot.ActionFrame) (string, model.Binding, int, string) {
+func (c *DownstreamConn) ResolveTarget(frame onebot.ActionFrame) (string, JBinding, int, string) {
 	if c.fixedSelfID != "" {
-		c.mu.RLock()
-		b, ok := c.bindings[c.fixedAccountID]
-		c.mu.RUnlock()
-		if !ok || !b.Enabled {
-			return "", model.Binding{}, onebot.RetForbidden, "账号 " + c.fixedSelfID + " 未授权给当前 Bot"
+		b, ok := c.bindingFor(c.fixedSelfID)
+		if !ok {
+			return "", JBinding{}, onebot.RetForbidden, "账号 " + c.fixedSelfID + " 未授权给当前 Bot"
 		}
 		return c.fixedSelfID, b, 0, ""
 	}
@@ -178,20 +171,19 @@ func (c *DownstreamConn) ResolveTarget(frame onebot.ActionFrame) (string, model.
 	if explicit != "" {
 		b, ok := c.bindingFor(explicit)
 		if !ok {
-			return "", model.Binding{}, onebot.RetForbidden, "账号 " + explicit + " 未授权给当前 Bot"
+			return "", JBinding{}, onebot.RetForbidden, "账号 " + explicit + " 未授权给当前 Bot"
 		}
 		return explicit, b, 0, ""
 	}
 
 	if b, ok := c.defaultBinding(); ok {
-		acc, err := c.hub.store.AccountByID(context.Background(), b.AccountID)
-		if err != nil {
-			return "", model.Binding{}, onebot.RetImplError, "绑定账号不存在"
+		if _, found := c.hub.conns.AccountBySelfID(b.AccountSelfID); !found {
+			return "", JBinding{}, onebot.RetImplError, "绑定账号不存在"
 		}
-		return acc.SelfID, b, 0, ""
+		return b.AccountSelfID, b, 0, ""
 	}
 
-	return "", model.Binding{}, onebot.RetNotFound, "无法确定目标账号：请在动作中指定 self_id，或将该 Bot 只绑定一个账号"
+	return "", JBinding{}, onebot.RetNotFound, "无法确定目标账号：请在动作中指定 self_id，或将该 Bot 只绑定一个账号"
 }
 
 // paramsSelfID reads the loose params.self_id hint.
@@ -218,24 +210,17 @@ func (h *Hub) HandleDownstream(ctx context.Context, info DownstreamInfo, peer Pe
 		return err
 	}
 	if info.FixedSelfID != "" {
-		account, err := h.store.AccountBySelfID(ctx, info.FixedSelfID)
-		if err != nil {
+		if _, found := h.conns.AccountBySelfID(info.FixedSelfID); !found {
 			return fmt.Errorf("hub: transparent view requested for unknown account %s", info.FixedSelfID)
 		}
-		conn.mu.Lock()
-		_, bound := conn.bindings[account.ID]
-		if bound {
-			conn.fixedAccountID = account.ID
-		}
-		conn.mu.Unlock()
-		if !bound {
+		if _, bound := conn.bindingFor(info.FixedSelfID); !bound {
 			return fmt.Errorf("hub: account %s is not bound to bot %s", info.FixedSelfID, info.Bot.Name)
 		}
 	}
 	h.addDownstream(conn)
 	defer h.removeDownstream(conn)
 
-	if err := h.store.TouchBotSeen(ctx, info.Bot.ID, time.Now()); err != nil {
+	if err := h.conns.TouchBotSeen(info.Bot.ID); err != nil {
 		h.logger.Warn("could not record bot activity", "bot", info.Bot.Name, "error", err)
 	}
 	h.logger.Info("downstream connection attached",

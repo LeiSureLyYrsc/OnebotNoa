@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/api"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/connect"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/connstore"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/cryptobox"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/logging"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
@@ -91,6 +95,38 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// connect.json is the second of the two files the hub generates: accounts,
+	// Bots, connections, bindings and the secrets those need. Its key lives in a
+	// separate file, so the document itself can be copied without handing over
+	// the credentials.
+	key, err := cryptobox.LoadOrCreateKey(cfg.Storage.ConnectKey)
+	if err != nil {
+		return err
+	}
+	box, err := cryptobox.NewBox(key)
+	if err != nil {
+		return err
+	}
+	connectStore, err := connect.Open(cfg.Storage.ConnectFile, box)
+	if err != nil {
+		return fmt.Errorf("connect.json 无法读取（已保留原文件）：%w", err)
+	}
+	if err := connectStore.SetServerInfo(connect.ServerInfo{
+		UpstreamPath:   cfg.OneBot.UpstreamWS.Path,
+		DownstreamPath: cfg.OneBot.DownstreamWS.Path,
+		HTTPAPIPath:    cfg.OneBot.HTTP.APIPath,
+		HTTPReportPath: cfg.OneBot.HTTP.ReportPath,
+	}); err != nil {
+		logger.Warn("could not record the shared endpoints in connect.json", "error", err)
+	}
+
+	// The upgrade path runs before the database is opened for normal use: an
+	// older build kept connections in tables that migration 0003 drops, so they
+	// are copied into connect.json first. The other order would lose them.
+	if err := migrateLegacyConnections(ctx, cfg, connectStore, logger); err != nil {
+		return err
+	}
+
 	st, err := store.Open(ctx, cfg.Storage.SQLite)
 	if err != nil {
 		return err
@@ -110,7 +146,15 @@ func runServe(args []string) error {
 	authManager := auth.NewManager(st, cfg.Storage.SessionTTL.Std(), logger)
 	go runSessionCleanup(ctx, authManager, logger)
 
-	relay := hub.New(cfg, st, logger)
+	connections := connstore.New(connectStore)
+	logger.Info("connection file ready",
+		"path", connectStore.Path(),
+		"key", cfg.Storage.ConnectKey,
+		"accounts", len(connectStore.ListAccounts()),
+		"bots", len(connectStore.ListBots()),
+		"connections", len(connectStore.ListConnections()))
+
+	relay := hub.New(cfg, st, connections, logger)
 
 	// Live view (SSE ring), metrics and the policy engine all hang off the hub.
 	eventLog := hub.NewEventLog(cfg.Storage.EventRing)
@@ -135,16 +179,16 @@ func runServe(args []string) error {
 	})
 	go runPolicySweep(ctx, policyEngine, logger)
 
-	dataPlane := transport.NewDataPlane(cfg, st, relay, logger)
+	dataPlane := transport.NewDataPlane(cfg, connections.Plane(), relay, logger)
 
 	// Outbound connections: the hub dials QQ implementations and Bot servers.
-	dialManager := transport.NewDialManager(cfg, st, relay, logger)
-	dialManager.Start(ctx, transport.LoadEndpointSpecs(ctx, cfg, st, logger))
+	dialManager := transport.NewDialManager(cfg, connections.Plane(), relay, logger)
+	dialManager.Start(ctx, transport.LoadEndpointSpecs(connections.Plane(), logger))
 
 	// Dedicated listeners own their own address (and their own socket), so they
 	// can be created, changed or removed while the process keeps running.
-	listenerManager := transport.NewListenerManager(cfg, st, dataPlane, logger)
-	listenerManager.Start(ctx, transport.LoadListenerSpecs(ctx, cfg, st, logger))
+	listenerManager := transport.NewListenerManager(cfg, connections.Plane(), dataPlane, logger)
+	listenerManager.Start(ctx, transport.LoadListenerSpecs(connections.Plane(), logger))
 
 	startedAt := time.Now()
 	mux := transport.NewMux(transport.Options{Version: version, StartedAt: startedAt, Logger: logger})
@@ -153,18 +197,19 @@ func runServe(args []string) error {
 		mux.HandleFunc("GET /metrics", transport.MetricsHandler(metricsCollector, relay, eventLog, policyEngine))
 	}
 	api.New(api.Options{
-		Store:     st,
-		Auth:      authManager,
-		Logger:    logger,
-		Config:    cfg,
-		Hub:       relay,
-		Events:    eventLog,
-		Metrics:   metricsCollector,
-		Policy:    policyEngine,
-		Dialer:    dialManager,
-		Listeners: listenerManager,
-		Version:   version,
-		StartedAt: startedAt,
+		Store:       st,
+		Connections: connectStore,
+		Auth:        authManager,
+		Logger:      logger,
+		Config:      cfg,
+		Hub:         relay,
+		Events:      eventLog,
+		Metrics:     metricsCollector,
+		Policy:      policyEngine,
+		Dialer:      dialManager,
+		Listeners:   listenerManager,
+		Version:     version,
+		StartedAt:   startedAt,
 	}).Register(mux)
 
 	srv := &http.Server{
@@ -329,4 +374,139 @@ func runResetPassword(args []string) error {
 		fmt.Println("store it now: it is not saved anywhere in plaintext")
 	}
 	return nil
+}
+
+// migrateLegacyConnections copies the pre-connect.json connection tables into the
+// generated file, once, before migration 0003 drops them.
+//
+// It is safe to call on every start: it does nothing when the database has no
+// such tables (a fresh install) or when connect.json already has content.
+func migrateLegacyConnections(ctx context.Context, cfg *config.Config, store *connect.Store, logger *slog.Logger) error {
+	probe, err := legacyStore(ctx, cfg)
+	if err != nil {
+		// An unreadable database is not fatal here: the hub can still run without
+		// the management plane.
+		logger.Warn("could not inspect the database for legacy connections", "error", err)
+		return nil
+	}
+	if probe == nil {
+		return nil
+	}
+	defer func() { _ = probe.Close() }()
+
+	if !probe.HasLegacyConnections(ctx) {
+		return nil
+	}
+	graph, err := probe.LegacyGraph(ctx)
+	if err != nil {
+		return fmt.Errorf("读取旧连接表失败（connect.json 未改动）: %w", err)
+	}
+	legacy := toLegacyRow(graph)
+	imported, err := store.SeedFromLegacy(legacy)
+	if err != nil {
+		return fmt.Errorf("写入 connect.json 失败: %w", err)
+	}
+	if imported > 0 {
+		logger.Warn("migrated connections out of the database into connect.json",
+			"entities", imported, "path", store.Path(),
+			"accounts", len(graph.Accounts), "bots", len(graph.Bots),
+			"connections", len(graph.Listeners)+len(graph.Endpoints),
+			"bindings", len(graph.Bindings))
+	}
+	return nil
+}
+
+// legacyStore opens the database just far enough to inspect it.
+func legacyStore(ctx context.Context, cfg *config.Config) (*store.Store, error) {
+	if _, statErr := os.Stat(cfg.Storage.SQLite); errors.Is(statErr, os.ErrNotExist) {
+		return nil, nil // a fresh install has nothing to migrate
+	}
+	return store.Open(ctx, cfg.Storage.SQLite)
+}
+
+// toLegacyRow converts the store's legacy graph into the shape connect.json
+// imports, resolving ids to names along the way.
+func toLegacyRow(graph store.LegacyConnectionGraph) connect.LegacyRow {
+	accountSelfID := map[int64]string{}
+	for _, account := range graph.Accounts {
+		accountSelfID[account.ID] = account.SelfID
+	}
+	botName := map[int64]string{}
+	for _, bot := range graph.Bots {
+		botName[bot.ID] = bot.Name
+	}
+
+	out := connect.LegacyRow{}
+	for _, account := range graph.Accounts {
+		out.Accounts = append(out.Accounts, connect.LegacyAccount{
+			SelfID: account.SelfID, Name: account.Name, Nickname: account.Nickname,
+			Avatar: account.Avatar, Enabled: account.Enabled, Tags: parseTags(account.Tags),
+			TokenHash: account.TokenHash, Source: account.Source,
+		})
+	}
+	for _, bot := range graph.Bots {
+		out.Bots = append(out.Bots, connect.LegacyBot{
+			Name: bot.Name, Enabled: bot.Enabled, Note: bot.Note,
+			RateLimit:    json.RawMessage(orEmptyJSON(bot.RateLimit, "{}")),
+			ActionPolicy: json.RawMessage(orEmptyJSON(bot.ActionPolicy, "{}")),
+			TokenHash:    bot.TokenHash,
+		})
+	}
+	for _, binding := range graph.Bindings {
+		out.Bindings = append(out.Bindings, connect.LegacyBinding{
+			BotName: botName[binding.BotID], AccountSelfID: accountSelfID[binding.AccountID],
+			Priority: binding.Priority, IsDefault: binding.IsDefault, Enabled: binding.Enabled,
+			Scope: parseScopeFields(binding.Scope),
+		})
+	}
+	for _, listener := range graph.Listeners {
+		out.Listeners = append(out.Listeners, connect.LegacyConnection{
+			Name: listener.Name, Kind: listener.Kind, Addr: listener.BindAddr, Path: listener.Path,
+			AccountSelfID: listener.AccountSelfID, BotName: listener.BotName,
+			FixedSelfID: listener.FixedSelfID, TLSCert: listener.TLSCert, TLSKey: listener.TLSKey,
+			Enabled: listener.Enabled,
+		})
+	}
+	for _, endpoint := range graph.Endpoints {
+		out.Endpoints = append(out.Endpoints, connect.LegacyConnection{
+			Name: endpoint.Name, Kind: endpoint.Kind, URL: endpoint.URL, Mode: endpoint.Mode,
+			AccountSelfID: endpoint.AccountHint, BotName: endpoint.BotName,
+			Token: endpoint.Token, Enabled: endpoint.Enabled,
+		})
+		connection := &out.Endpoints[len(out.Endpoints)-1]
+		if endpoint.Reconnect != "" {
+			var wire struct {
+				Min    string  `json:"min"`
+				Max    string  `json:"max"`
+				Jitter float64 `json:"jitter"`
+			}
+			if err := json.Unmarshal([]byte(endpoint.Reconnect), &wire); err == nil {
+				connection.Min, connection.Max, connection.Jitter = wire.Min, wire.Max, wire.Jitter
+			}
+		}
+	}
+	return out
+}
+
+func parseTags(raw string) []string {
+	var out []string
+	if err := json.Unmarshal([]byte(orEmptyJSON(raw, "[]")), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func parseScopeFields(raw string) connect.Scope {
+	var scope connect.Scope
+	if err := json.Unmarshal([]byte(orEmptyJSON(raw, "{}")), &scope); err != nil {
+		return connect.Scope{}
+	}
+	return scope
+}
+
+func orEmptyJSON(raw, fallback string) string {
+	if strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	return raw
 }

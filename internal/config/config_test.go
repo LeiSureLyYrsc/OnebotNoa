@@ -50,6 +50,38 @@ func TestLoadMergesOverridesOnTopOfDefaults(t *testing.T) {
 	}
 }
 
+// TestConnectionKeysLeftTheFile pins the split: config.yaml is static settings
+// only. Accounts, Bots, connections and bindings moved to connect.json, and a
+// stale key must fail loudly instead of being silently ignored - an operator who
+// keeps writing "endpoints:" here would otherwise wonder why nothing connects.
+func TestConnectionKeysLeftTheFile(t *testing.T) {
+	for _, key := range []string{"endpoints", "dedicated"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		body := key + ": []\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("%q belongs to connect.json now and must be rejected here", key)
+		}
+	}
+}
+
+// TestDefaultKeepsTheTwoFilesSeparate makes sure the generated key can never be
+// written into the document it protects.
+func TestDefaultKeepsTheTwoFilesSeparate(t *testing.T) {
+	cfg := Default()
+	if cfg.Storage.ConnectFile == "" || cfg.Storage.ConnectKey == "" {
+		t.Fatalf("both generated files need a default path: %+v", cfg.Storage)
+	}
+	if cfg.Storage.ConnectFile == cfg.Storage.ConnectKey {
+		t.Fatal("the key must live in its own file")
+	}
+	if cfg.Storage.ConnectFile == cfg.Storage.SQLite {
+		t.Fatal("connect.json and the management database are different files")
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("policcy:\n  action_timeout: 1s\n"), 0o600); err != nil {
@@ -62,18 +94,18 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 
 func TestValidateRejectsBadValues(t *testing.T) {
 	cases := map[string]func(*Config){
-		"empty listen":     func(c *Config) { c.Server.Listen = "" },
-		"half tls":         func(c *Config) { c.Server.TLSCert = "/tmp/cert.pem" },
-		"bad log level":    func(c *Config) { c.Log.Level = "verbose" },
-		"relative path":    func(c *Config) { c.OneBot.UpstreamWS.Path = "onebot/v11/ws" },
-		"bad account pol":  func(c *Config) { c.OneBot.UpstreamWS.UnknownAccountPolicy = "maybe" },
-		"bad backpressure": func(c *Config) { c.Policy.BotBackpressure = "explode" },
-		"bad meta events":  func(c *Config) { c.Policy.MetaEvents = "sometimes" },
-		"zero queue":       func(c *Config) { c.Policy.WriteQueueSize = 0 },
-		"empty sqlite":     func(c *Config) { c.Storage.SQLite = "" },
-		"bad endpoint": func(c *Config) {
-			c.Endpoints = []Endpoint{{Name: "x", Kind: "sideways", URL: "ws://x"}}
-		},
+		"empty listen":       func(c *Config) { c.Server.Listen = "" },
+		"half tls":           func(c *Config) { c.Server.TLSCert = "/tmp/cert.pem" },
+		"bad log level":      func(c *Config) { c.Log.Level = "verbose" },
+		"relative path":      func(c *Config) { c.OneBot.UpstreamWS.Path = "onebot/v11/ws" },
+		"bad account pol":    func(c *Config) { c.OneBot.UpstreamWS.UnknownAccountPolicy = "maybe" },
+		"bad backpressure":   func(c *Config) { c.Policy.BotBackpressure = "explode" },
+		"bad meta events":    func(c *Config) { c.Policy.MetaEvents = "sometimes" },
+		"zero queue":         func(c *Config) { c.Policy.WriteQueueSize = 0 },
+		"empty sqlite":       func(c *Config) { c.Storage.SQLite = "" },
+		"empty connect file": func(c *Config) { c.Storage.ConnectFile = "" },
+		"empty connect key":  func(c *Config) { c.Storage.ConnectKey = "" },
+		"key same as file":   func(c *Config) { c.Storage.ConnectKey = c.Storage.ConnectFile },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/connect"
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 )
 
 // peerView describes one live connection of an account.
@@ -22,17 +22,32 @@ type peerView struct {
 	Dropped    int64  `json:"dropped"`
 }
 
-// accountView is the API shape of a QQ instance: the stored row plus live state.
+// accountView is the API shape of a QQ instance: the connect.json row plus live
+// state and the connection detail an operator needs to wire a client up.
 type accountView struct {
-	model.Account
+	connect.Account
 	LiveState    string     `json:"live_state"`
 	Peers        []peerView `json:"peers"`
 	BindingCount int        `json:"binding_count"`
+	HasToken     bool       `json:"has_token"`
+	Token        string     `json:"token,omitempty"`
+	Endpoints    []string   `json:"endpoints"`
+
+	// ClientURL is the ready-to-paste address of this instance, so an operator
+	// never has to assemble host + path + token by hand.
+	ClientURL string `json:"client_url,omitempty"`
 }
 
-func (s *Server) accountView(a model.Account, bindingCount int) accountView {
-	view := accountView{Account: a, LiveState: a.Status, Peers: []peerView{}, BindingCount: bindingCount}
-	if session, ok := s.opt.Hub.Registry().Session(a.SelfID); ok {
+func (s *Server) accountView(account connect.Account, bindingCount int, showToken bool) accountView {
+	view := accountView{
+		Account:      account,
+		LiveState:    "offline",
+		Peers:        []peerView{},
+		BindingCount: bindingCount,
+		HasToken:     account.Grant.Token != "",
+		Endpoints:    s.accountEndpoints(account.SelfID),
+	}
+	if session, ok := s.opt.Hub.Registry().Session(account.SelfID); ok {
 		view.LiveState = session.State()
 		for _, p := range session.Peers() {
 			view.Peers = append(view.Peers, peerView{
@@ -45,34 +60,103 @@ func (s *Server) accountView(a model.Account, bindingCount int) accountView {
 			})
 		}
 	}
+	if showToken {
+		if token, err := s.opt.Connections.AccountToken(account.ID); err == nil {
+			view.Token = token
+			if len(view.Endpoints) > 0 {
+				view.ClientURL = view.Endpoints[0] + "/" + token
+			}
+		}
+	}
 	return view
 }
 
+// accountEndpoints lists the addresses this account answers on: the shared
+// endpoint plus any dedicated listener pinned to it.
+func (s *Server) accountEndpoints(selfID string) []string {
+	out := []string{}
+	if s.opt.Config == nil {
+		return out
+	}
+	base := "ws://" + publicBase(s.opt.Config.Server.Listen)
+	if s.opt.Config.OneBot.UpstreamWS.Enable {
+		out = append(out, base+s.opt.Config.OneBot.UpstreamWS.Path)
+	}
+	if s.opt.Connections == nil {
+		return out
+	}
+	for _, connection := range s.opt.Connections.ListConnections() {
+		if connection.Kind != connect.KindUpstreamListen || !connection.Enabled {
+			continue
+		}
+		if connection.AccountSelfID != selfID {
+			continue
+		}
+		scheme := "ws"
+		if connection.TLSCert != "" && connection.TLSKey != "" {
+			scheme = "wss"
+		}
+		path := connection.Path
+		if path == "" {
+			path = "/onebot/v11/ws"
+		}
+		out = append(out, scheme+"://"+displayHost(connection.Addr)+path)
+	}
+	return out
+}
+
+// displayHost turns a bind address into something an operator can dial.
+func displayHost(addr string) string {
+	if addr == "" {
+		return "127.0.0.1"
+	}
+	switch {
+	case strings.HasPrefix(addr, "0.0.0.0:"):
+		return "127.0.0.1:" + strings.TrimPrefix(addr, "0.0.0.0:")
+	case strings.HasPrefix(addr, "[::]:"):
+		return "127.0.0.1:" + strings.TrimPrefix(addr, "[::]:")
+	}
+	return addr
+}
+
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	accounts, err := s.opt.Store.ListAccounts(ctx)
-	if err != nil {
-		s.fail(w, "读取账号列表失败", err)
+	if s.opt.Connections == nil {
+		writeError(w, http.StatusServiceUnavailable, "连接配置文件尚未就绪")
 		return
 	}
-	bindings, err := s.opt.Store.ListBindings(ctx)
-	if err != nil {
-		s.fail(w, "读取绑定关系失败", err)
-		return
-	}
-	counts := map[int64]int{}
+	accounts := s.opt.Connections.ListAccounts()
+	bindings := s.opt.Connections.ListBindings()
+	counts := map[string]int{}
 	for _, b := range bindings {
-		counts[b.AccountID]++
+		counts[b.AccountSelfID]++
 	}
 
 	views := make([]accountView, 0, len(accounts))
-	for _, a := range accounts {
-		views = append(views, s.accountView(a, counts[a.ID]))
+	for _, account := range accounts {
+		views = append(views, s.accountView(account, counts[account.SelfID], false))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts": views,
 		"pending":  s.pendingViews(),
+		"file":     s.connectionsFileInfo(),
 	})
+}
+
+// connectionsFileInfo tells the WebUI where the generated file lives.
+func (s *Server) connectionsFileInfo() map[string]any {
+	if s.opt.Connections == nil {
+		return map[string]any{}
+	}
+	info := map[string]any{
+		"path": s.opt.Connections.Path(),
+		"note": "账号 / Bot / 连接 / 绑定 保存在 connect.json；进程级静态配置在 config.yaml。",
+	}
+	if store, ok := s.opt.Connections.(interface{ LastError() error }); ok {
+		if err := store.LastError(); err != nil {
+			info["last_error"] = err.Error()
+		}
+	}
+	return info
 }
 
 func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
@@ -80,24 +164,30 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	account, err := s.opt.Store.AccountByID(r.Context(), id)
-	if err != nil {
-		s.notFoundOrFail(w, "账号不存在", err)
+	if s.opt.Connections == nil {
+		writeError(w, http.StatusServiceUnavailable, "连接配置文件尚未就绪")
 		return
 	}
-	bindings, _ := s.opt.Store.BindingsByAccount(r.Context(), account.ID)
+	account, found := s.opt.Connections.AccountByID(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "账号不存在")
+		return
+	}
+	bindings := s.opt.Connections.BindingsByAccount(account.SelfID)
+	// A single-account read may reveal the token: the operator opened this row.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account":  s.accountView(account, len(bindings)),
-		"bindings": bindings,
+		"account":  s.accountView(account, len(bindings), true),
+		"bindings": s.bindingViewsFor(account.SelfID),
 	})
 }
 
 type accountRequest struct {
-	SelfID   string          `json:"self_id"`
-	Name     string          `json:"name"`
-	Enabled  *bool           `json:"enabled"`
-	Tags     json.RawMessage `json:"tags"`
-	Nickname string          `json:"nickname"`
+	SelfID   string   `json:"self_id"`
+	Name     string   `json:"name"`
+	Enabled  *bool    `json:"enabled"`
+	Tags     []string `json:"tags"`
+	Nickname string   `json:"nickname"`
+	Note     string   `json:"note"`
 }
 
 func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -111,9 +201,9 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "self_id 不能为空")
 		return
 	}
-	account, err := s.opt.Store.CreateAccount(r.Context(), req.SelfID, strings.TrimSpace(req.Name), "manual")
+	account, err := s.opt.Connections.CreateAccount(req.SelfID, strings.TrimSpace(req.Name), "manual")
 	if err != nil {
-		if isUniqueViolation(err) {
+		if errors.Is(err, connect.ErrDuplicateName) {
 			writeError(w, http.StatusConflict, "该 self_id 已存在")
 			return
 		}
@@ -122,7 +212,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, s.actor(r), "account.create", account.SelfID, "")
 	s.opt.Hub.InvalidateBindings()
-	writeJSON(w, http.StatusCreated, map[string]any{"account": s.accountView(account, 0)})
+	writeJSON(w, http.StatusCreated, map[string]any{"account": s.accountView(account, 0, false)})
 }
 
 func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
@@ -130,9 +220,9 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	account, err := s.opt.Store.AccountByID(r.Context(), id)
-	if err != nil {
-		s.notFoundOrFail(w, "账号不存在", err)
+	account, found := s.opt.Connections.AccountByID(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "账号不存在")
 		return
 	}
 
@@ -147,18 +237,17 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	if req.Nickname != "" {
 		account.Nickname = req.Nickname
 	}
+	if req.Note != "" {
+		account.Note = req.Note
+	}
 	if req.Enabled != nil {
 		account.Enabled = *req.Enabled
 	}
-	if problem := jsonKindProblem(req.Tags, "array"); problem != "" {
-		writeError(w, http.StatusBadRequest, "tags "+problem)
-		return
-	}
-	if len(req.Tags) > 0 {
+	if req.Tags != nil {
 		account.Tags = req.Tags
 	}
 
-	if err := s.opt.Store.UpdateAccountProfile(r.Context(), account); err != nil {
+	if err := s.opt.Connections.UpdateAccount(account); err != nil {
 		s.fail(w, "更新账号失败", err)
 		return
 	}
@@ -172,7 +261,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"account": s.accountView(account, 0)})
+	writeJSON(w, http.StatusOK, map[string]any{"account": s.accountView(account, 0, false)})
 }
 
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
@@ -180,9 +269,9 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	account, err := s.opt.Store.AccountByID(r.Context(), id)
-	if err != nil {
-		s.notFoundOrFail(w, "账号不存在", err)
+	account, found := s.opt.Connections.AccountByID(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "账号不存在")
 		return
 	}
 	if session, ok := s.opt.Hub.Registry().Session(account.SelfID); ok {
@@ -190,7 +279,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 			p.Close(1008, "account deleted by an administrator")
 		}
 	}
-	if err := s.opt.Store.DeleteAccount(r.Context(), id); err != nil {
+	if err := s.opt.Connections.DeleteAccount(id); err != nil {
 		s.fail(w, "删除账号失败", err)
 		return
 	}
@@ -199,16 +288,18 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": account.SelfID})
 }
 
-// handleRotateAccountToken issues a per-instance token. The plaintext is
-// returned exactly once; only its hash is stored.
+// handleRotateAccountToken issues a per-instance token.
+//
+// Unlike a Bot token this one is not hash-only: connect.json keeps it sealed so
+// the WebUI can show it again and the hub can dial with it.
 func (s *Server) handleRotateAccountToken(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.pathID(w, r)
 	if !ok {
 		return
 	}
-	account, err := s.opt.Store.AccountByID(r.Context(), id)
-	if err != nil {
-		s.notFoundOrFail(w, "账号不存在", err)
+	account, found := s.opt.Connections.AccountByID(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "账号不存在")
 		return
 	}
 	plain, hash, err := auth.NewToken()
@@ -216,16 +307,16 @@ func (s *Server) handleRotateAccountToken(w http.ResponseWriter, r *http.Request
 		s.fail(w, "生成 token 失败", err)
 		return
 	}
-	if err := s.opt.Store.SetAccountToken(r.Context(), account.ID, &hash); err != nil {
+	if err := s.opt.Connections.SetAccountToken(account.ID, plain, hash, tokenHint(plain)); err != nil {
 		s.fail(w, "保存 token 失败", err)
 		return
 	}
 	s.audit(r, s.actor(r), "account.token.rotate", account.SelfID, "")
-	account.HasToken = true
+	account.Grant = connect.Grant{TokenHash: hash}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account": s.accountView(account, 0),
+		"account": s.accountView(account, 0, false),
 		"token":   plain,
-		"hint":    "该 token 只显示一次，请立刻保存；它用于该 QQ 实例连接 /onebot/v11/ws",
+		"hint":    "token 同时写入 connect.json（本地密钥加密）；随时可在本页重新查看。用于该 QQ 实例连接 /onebot/v11/ws",
 	})
 }
 
@@ -234,18 +325,18 @@ func (s *Server) handleClearAccountToken(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	account, err := s.opt.Store.AccountByID(r.Context(), id)
-	if err != nil {
-		s.notFoundOrFail(w, "账号不存在", err)
+	account, found := s.opt.Connections.AccountByID(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "账号不存在")
 		return
 	}
-	if err := s.opt.Store.SetAccountToken(r.Context(), account.ID, nil); err != nil {
+	if err := s.opt.Connections.SetAccountToken(account.ID, "", "", ""); err != nil {
 		s.fail(w, "清除 token 失败", err)
 		return
 	}
 	s.audit(r, s.actor(r), "account.token.clear", account.SelfID, "")
-	account.HasToken = false
-	writeJSON(w, http.StatusOK, map[string]any{"account": s.accountView(account, 0)})
+	account.Grant = connect.Grant{}
+	writeJSON(w, http.StatusOK, map[string]any{"account": s.accountView(account, 0, false)})
 }
 
 // --------------------------------------------------------- pending approvals
@@ -296,13 +387,19 @@ func (s *Server) handleApprovePending(w http.ResponseWriter, r *http.Request) {
 	}
 	account, err := s.opt.Hub.Registry().ApprovePending(r.Context(), req.ID)
 	if err != nil {
-		s.notFoundOrFail(w, "待接入项不存在或已处理", err)
+		writeError(w, http.StatusNotFound, "待接入项不存在或已处理")
 		return
 	}
 	s.audit(r, s.actor(r), "account.approve", account.SelfID, req.ID)
+	view := accountView{
+		Account:   connect.Account{SelfID: account.SelfID, Name: account.Name, Enabled: account.Enabled},
+		LiveState: account.Status,
+		Peers:     []peerView{},
+		Endpoints: s.accountEndpoints(account.SelfID),
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"account": s.accountView(account, 0),
-		"hint":    "已创建账号；客户端会在下次重连时接入（反向 WS 默认 3 秒重试）",
+		"account": view,
+		"hint":    "已在 connect.json 中创建账号；客户端会在下次重连时接入",
 	})
 }
 
@@ -345,18 +442,26 @@ func (s *Server) fail(w http.ResponseWriter, message string, err error) {
 }
 
 func (s *Server) notFoundOrFail(w http.ResponseWriter, message string, err error) {
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, connect.ErrNotFound) {
 		writeError(w, http.StatusNotFound, message)
 		return
 	}
 	s.fail(w, message, err)
 }
 
-// isUniqueViolation detects SQLite's UNIQUE constraint error so the API can
-// answer 409 instead of 500.
+// isUniqueViolation detects a duplicate name so the API can answer 409.
 func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(strings.ToUpper(err.Error()), "UNIQUE CONSTRAINT")
+	return err != nil && (errors.Is(err, connect.ErrDuplicateName) ||
+		strings.Contains(strings.ToUpper(err.Error()), "UNIQUE CONSTRAINT"))
 }
+
+// tokenHint is the non-secret reminder shown next to a token.
+func tokenHint(token string) string {
+	if len(token) <= 8 {
+		return "…"
+	}
+	return token[:4] + "…" + token[len(token)-4:]
+}
+
+var _ = hub.Account{}
+var _ = json.Valid

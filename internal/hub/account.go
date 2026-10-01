@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
 
@@ -18,12 +17,12 @@ var ErrTokenMismatch = errors.New("hub: token mismatch for the same self_id and 
 // physical key is (kind, self_id, role, connID) and never self_id alone.
 type AccountSession struct {
 	mu      sync.RWMutex
-	account model.Account
+	account Account
 	peers   map[string]Peer
 	logger  *slog.Logger
 }
 
-func newAccountSession(account model.Account, logger *slog.Logger) *AccountSession {
+func newAccountSession(account Account, logger *slog.Logger) *AccountSession {
 	return &AccountSession{
 		account: account,
 		peers:   map[string]Peer{},
@@ -35,14 +34,14 @@ func newAccountSession(account model.Account, logger *slog.Logger) *AccountSessi
 func (a *AccountSession) SelfID() string { return a.account.SelfID }
 
 // Account returns a copy of the persisted row.
-func (a *AccountSession) Account() model.Account {
+func (a *AccountSession) Account() Account {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.account
 }
 
-// SetAccount refreshes the cached row after a database change.
-func (a *AccountSession) SetAccount(account model.Account) {
+// SetAccount refreshes the cached row after a change in connect.json.
+func (a *AccountSession) SetAccount(account Account) {
 	a.mu.Lock()
 	a.account = account
 	a.mu.Unlock()
@@ -126,7 +125,7 @@ func (a *AccountSession) State() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if len(a.peers) == 0 {
-		return model.StatusOffline
+		return StatusOffline
 	}
 	var events, actions bool
 	for _, p := range a.peers {
@@ -138,9 +137,9 @@ func (a *AccountSession) State() string {
 		}
 	}
 	if events && actions {
-		return model.StatusOnline
+		return StatusOnline
 	}
-	return model.StatusDegraded
+	return StatusDegraded
 }
 
 // CanReceiveEvents reports whether any connection can deliver events.

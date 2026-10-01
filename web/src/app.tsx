@@ -10,6 +10,7 @@ import { BindingsPage } from "./pages/bindings";
 import { EventsPage } from "./pages/events";
 import { ListenersPage } from "./pages/listeners";
 import { EndpointsPage } from "./pages/endpoints";
+import { ConnectionsPage } from "./pages/connections";
 import { ConsolePage } from "./pages/console";
 import { LogsPage } from "./pages/logs";
 
@@ -23,6 +24,7 @@ const NAV: Array<{ id: PageId; label: string }> = [
   { id: "logs", label: "日志审计" },
   { id: "listeners", label: "监听端点" },
   { id: "endpoints", label: "拨号目标" },
+  { id: "connections", label: "连接文件" },
 ];
 
 export function App() {
@@ -147,6 +149,8 @@ function renderPage(page: PageId) {
       return <ListenersPage />;
     case "endpoints":
       return <EndpointsPage />;
+    case "connections":
+      return <ConnectionsPage />;
     case "console":
       return <ConsolePage />;
     case "logs":

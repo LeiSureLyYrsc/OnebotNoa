@@ -39,15 +39,21 @@ func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(),
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 // Config is the root configuration document.
+//
+// It is deliberately static and hand-written. Everything an operator changes
+// while the hub runs (accounts, Bots, connections, bindings, and the secrets
+// those need) lives in connect.json instead, which the hub generates and the
+// WebUI edits. One rule separates the two files:
+//
+//	config.yaml   needs a restart   listen address, endpoint paths, policy
+//	connect.json  applies live     connections, accounts, Bots, bindings
 type Config struct {
-	Server    Server     `yaml:"server"`
-	OneBot    OneBot     `yaml:"onebot"`
-	Policy    Policy     `yaml:"policy"`
-	Storage   Storage    `yaml:"storage"`
-	Metrics   Metrics    `yaml:"metrics"`
-	Log       Log        `yaml:"log"`
-	Endpoints []Endpoint `yaml:"endpoints"`
-	Dedicated []Listener `yaml:"dedicated"`
+	Server  Server  `yaml:"server"`
+	OneBot  OneBot  `yaml:"onebot"`
+	Policy  Policy  `yaml:"policy"`
+	Storage Storage `yaml:"storage"`
+	Metrics Metrics `yaml:"metrics"`
+	Log     Log     `yaml:"log"`
 }
 
 // Server holds process-level HTTP settings.
@@ -128,10 +134,21 @@ type RateLimit struct {
 }
 
 // Storage configures persistence and in-memory retention.
+//
+// Two files, two jobs:
+//
+//	sqlite        the management database: users, sessions, settings, audit
+//	connect_file  the connection document the hub generates and the WebUI edits
+//
+// Keeping connections out of the database is what makes them copyable between
+// deployments and reviewable in a diff - and it means a damaged database cannot
+// take the data plane down.
 type Storage struct {
-	SQLite     string   `yaml:"sqlite"`
-	EventRing  int      `yaml:"event_ring"`
-	SessionTTL Duration `yaml:"session_ttl"`
+	SQLite      string   `yaml:"sqlite"`
+	ConnectFile string   `yaml:"connect_file"`
+	ConnectKey  string   `yaml:"connect_key"`
+	EventRing   int      `yaml:"event_ring"`
+	SessionTTL  Duration `yaml:"session_ttl"`
 }
 
 // Metrics configures the Prometheus text endpoint.
@@ -146,39 +163,11 @@ type Log struct {
 	AddSource bool   `yaml:"add_source"`
 }
 
-// Endpoint is a relay-dialed connection (the hub is the WebSocket client).
-type Endpoint struct {
-	Name        string    `yaml:"name"`
-	Kind        string    `yaml:"kind"`
-	URL         string    `yaml:"url"`
-	Token       string    `yaml:"token"`
-	Mode        string    `yaml:"mode"`
-	AccountHint string    `yaml:"account_hint"`
-	BotName     string    `yaml:"bot_name"`
-	Enabled     *bool     `yaml:"enabled"`
-	Reconnect   Reconnect `yaml:"reconnect"`
-}
-
 // Reconnect controls dial retry backoff.
 type Reconnect struct {
 	Min    Duration `yaml:"min"`
 	Max    Duration `yaml:"max"`
 	Jitter float64  `yaml:"jitter"`
-}
-
-// Listener is a dedicated (own port/path) listener. The same shape is stored in
-// the listeners table for WebUI-managed ones.
-type Listener struct {
-	Name          string `yaml:"name"`
-	Kind          string `yaml:"kind"`
-	Addr          string `yaml:"addr"`
-	Path          string `yaml:"path"`
-	AccountSelfID string `yaml:"account_self_id"`
-	BotName       string `yaml:"bot_name"`
-	FixedSelfID   string `yaml:"fixed_self_id"`
-	TLSCert       string `yaml:"tls_cert"`
-	TLSKey        string `yaml:"tls_key"`
-	Enabled       *bool  `yaml:"enabled"`
 }
 
 // Connection kinds, shared by listeners and outbound endpoints.
@@ -236,9 +225,11 @@ func Default() *Config {
 			PongTimeout:         Duration(10 * time.Second),
 		},
 		Storage: Storage{
-			SQLite:     "./data/onebotnoa.db",
-			EventRing:  2000,
-			SessionTTL: Duration(7 * 24 * time.Hour),
+			SQLite:      "./data/onebotnoa.db",
+			ConnectFile: "./data/connect.json",
+			ConnectKey:  "./data/connect.json.key",
+			EventRing:   2000,
+			SessionTTL:  Duration(7 * 24 * time.Hour),
 		},
 		Metrics: Metrics{Enable: true},
 		Log:     Log{Level: "info", Format: "json"},
@@ -279,6 +270,12 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("ONEBOTNOA_SQLITE"); v != "" {
 		c.Storage.SQLite = v
+	}
+	if v := os.Getenv("ONEBOTNOA_CONNECT_FILE"); v != "" {
+		c.Storage.ConnectFile = v
+	}
+	if v := os.Getenv("ONEBOTNOA_CONNECT_KEY"); v != "" {
+		c.Storage.ConnectKey = v
 	}
 	if v := os.Getenv("ONEBOTNOA_ADMIN_PASSWORD"); v != "" {
 		c.Server.AdminBootstrapPassword = v
@@ -357,22 +354,15 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Storage.SQLite) == "" {
 		return errors.New("config: storage.sqlite must not be empty")
 	}
-	for i, ep := range c.Endpoints {
-		switch ep.Kind {
-		case KindUpstreamDial, KindDownstreamDial:
-		default:
-			return fmt.Errorf("config: endpoints[%d].kind %q is not one of upstream_dial|downstream_dial", i, ep.Kind)
-		}
-		if strings.TrimSpace(ep.URL) == "" {
-			return fmt.Errorf("config: endpoints[%d].url must not be empty", i)
-		}
+	if strings.TrimSpace(c.Storage.ConnectFile) == "" {
+		return errors.New("config: storage.connect_file must not be empty")
 	}
-	for i, l := range c.Dedicated {
-		switch l.Kind {
-		case KindUpstreamListen, KindDownstreamListen:
-		default:
-			return fmt.Errorf("config: dedicated[%d].kind %q is not one of upstream_listen|downstream_listen", i, l.Kind)
-		}
+	if strings.TrimSpace(c.Storage.ConnectKey) == "" {
+		return errors.New("config: storage.connect_key must not be empty")
+	}
+	if c.Storage.ConnectKey == c.Storage.ConnectFile {
+		return errors.New("config: storage.connect_key must differ from storage.connect_file" +
+			"（密钥要与连接文件分开保存）")
 	}
 	return nil
 }

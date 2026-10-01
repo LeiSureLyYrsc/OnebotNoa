@@ -12,7 +12,6 @@ import (
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
 
 // Errors surfaced by the registry.
@@ -63,21 +62,31 @@ type Registry struct {
 	pending  map[string]*PendingConn
 	policy   string
 
-	store     *store.Store
+	conns     ConnStore
 	logger    *slog.Logger
 	observer  Observer
 	onConnect func(selfID string)
+	// audit is the management-database writer, injected by the hub so the hub
+	// package does not depend on the SQLite store.
+	audit func(model.AuditEntry) error
 }
 
-func newRegistry(st *store.Store, logger *slog.Logger) *Registry {
+func newRegistry(conns ConnStore, logger *slog.Logger) *Registry {
 	return &Registry{
 		sessions: map[string]*AccountSession{},
 		pending:  map[string]*PendingConn{},
 		policy:   "pending",
-		store:    st,
+		conns:    conns,
 		logger:   logger,
 		observer: NopObserver{},
 	}
+}
+
+// SetAuditWriter installs the audit sink used for refused connections.
+func (r *Registry) SetAuditWriter(write func(model.AuditEntry) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.audit = write
 }
 
 func (r *Registry) setObserver(o Observer) {
@@ -118,17 +127,19 @@ func (r *Registry) AttachUpstream(ctx context.Context, info UpstreamInfo, peer P
 	r.mu.Unlock()
 
 	if !live {
-		account, err := r.store.AccountBySelfID(ctx, selfID)
+		var account Account
+		existing, found := r.conns.AccountBySelfID(selfID)
 		switch {
-		case err == nil:
-			// known account
-		case errors.Is(err, store.ErrNotFound):
+		case found:
+			account = existing
+		default:
 			switch r.policy {
 			case "auto":
-				account, err = r.store.EnsureAccount(ctx, selfID, "", info.Source)
+				created, _, err := r.conns.EnsureAccount(selfID, info.Source)
 				if err != nil {
 					return nil, fmt.Errorf("hub: auto-create account %s: %w", selfID, err)
 				}
+				account = created
 				r.logger.Info("auto-created account", "self_id", selfID, "source", info.Source)
 			case "reject":
 				r.recordRejected(ctx, info, "unknown account")
@@ -137,8 +148,6 @@ func (r *Registry) AttachUpstream(ctx context.Context, info UpstreamInfo, peer P
 				r.recordPending(info)
 				return nil, ErrPendingApproval
 			}
-		default:
-			return nil, fmt.Errorf("hub: load account %s: %w", selfID, err)
 		}
 
 		if !account.Enabled {
@@ -168,8 +177,8 @@ func (r *Registry) AttachUpstream(ctx context.Context, info UpstreamInfo, peer P
 	}
 
 	state := session.State()
-	if err := r.store.UpdateAccountStatus(ctx, session.Account().ID, state, time.Now()); err != nil {
-		r.logger.Warn("could not persist account status", "self_id", selfID, "error", err)
+	if err := r.conns.PersistAccountState(selfID, state); err != nil {
+		r.logger.Warn("could not record account status", "self_id", selfID, "error", err)
 	}
 	r.notify(AccountEvent{
 		Type:       EventPeerConnected,
@@ -212,8 +221,8 @@ func (r *Registry) Detach(ctx context.Context, selfID, peerID string) *AccountSe
 	}
 
 	state := session.State()
-	if err := r.store.UpdateAccountStatus(ctx, session.Account().ID, state, time.Now()); err != nil {
-		r.logger.Warn("could not persist account status", "self_id", selfID, "error", err)
+	if err := r.conns.PersistAccountState(selfID, state); err != nil {
+		r.logger.Warn("could not record account status", "self_id", selfID, "error", err)
 	}
 	r.notify(AccountEvent{
 		Type:      EventPeerDisconnected,
@@ -270,7 +279,7 @@ func (r *Registry) Pending() []PendingConn {
 
 // ApprovePending creates the account behind a pending entry so that the client's
 // next reconnect succeeds.
-func (r *Registry) ApprovePending(ctx context.Context, id string) (model.Account, error) {
+func (r *Registry) ApprovePending(ctx context.Context, id string) (Account, error) {
 	r.mu.Lock()
 	entry, ok := r.pending[id]
 	if ok {
@@ -278,12 +287,12 @@ func (r *Registry) ApprovePending(ctx context.Context, id string) (model.Account
 	}
 	r.mu.Unlock()
 	if !ok {
-		return model.Account{}, store.ErrNotFound
+		return Account{}, ErrNotFound
 	}
 
-	account, err := r.store.EnsureAccount(ctx, entry.SelfID, "", entry.Source)
+	account, _, err := r.conns.EnsureAccount(entry.SelfID, entry.Source)
 	if err != nil {
-		return model.Account{}, err
+		return Account{}, err
 	}
 	r.logger.Info("pending account approved", "self_id", entry.SelfID, "account_id", account.ID)
 	return account, nil
@@ -350,7 +359,10 @@ func (r *Registry) recordRejected(ctx context.Context, info UpstreamInfo, reason
 		Detail: reason + " addr=" + info.RemoteAddr + " token_fp=" + info.TokenFingerprint,
 		IP:     info.RemoteAddr,
 	}
-	if err := r.store.AppendAudit(ctx, entry); err != nil {
+	if r.audit == nil {
+		return
+	}
+	if err := r.audit(entry); err != nil {
 		r.logger.Warn("could not write audit entry", "error", err)
 	}
 }

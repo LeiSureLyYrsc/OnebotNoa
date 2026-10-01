@@ -8,6 +8,7 @@ internal/webui/dist/*
 
 # runtime data
 data/
+test/
 *.db
 *.db-wal
 *.db-shm

@@ -71,7 +71,7 @@ func TestEventLogFanoutAndCancel(t *testing.T) {
 		t.Fatalf("subscribers = %d, want 1", log.Subscribers())
 	}
 
-	log.Publish(EventRecord{Kind: EventKindAction, Bot: "b"})     // filtered out
+	log.Publish(EventRecord{Kind: EventKindAction, Bot: "b"})      // filtered out
 	log.Publish(EventRecord{Kind: EventKindUpstream, SelfID: "1"}) // delivered
 
 	select {

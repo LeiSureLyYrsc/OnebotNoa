@@ -8,7 +8,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
@@ -45,7 +44,7 @@ func (d *DataPlane) handleUpstreamWS(w http.ResponseWriter, r *http.Request) {
 	tokenFP := hub.FingerprintToken(token)
 	boundSelfID := ""
 	if token != "" {
-		if account, err := d.store.AccountByTokenHash(r.Context(), auth.HashToken(token)); err == nil {
+		if account, found := d.conns.AccountByToken(token); found {
 			boundSelfID = account.SelfID
 		}
 	}

@@ -28,18 +28,22 @@ const (
 
 // Options wires the API server to the rest of the process.
 type Options struct {
-	Store     *store.Store
-	Auth      *auth.Manager
-	Logger    *slog.Logger
-	Config    *config.Config
-	Hub       *hub.Hub
-	Events    *hub.EventLog
-	Metrics   *hub.Metrics
-	Policy    *hub.PolicyEngine
-	Dialer    Dialer
-	Listeners ListenerRuntime
-	Version   string
-	StartedAt time.Time
+	Store *store.Store
+	// Connections is connect.json: the accounts, Bots, connections and grants the
+	// API edits. It is separate from Store because it is a generated document,
+	// not part of the management database.
+	Connections Connections
+	Auth        *auth.Manager
+	Logger      *slog.Logger
+	Config      *config.Config
+	Hub         *hub.Hub
+	Events      *hub.EventLog
+	Metrics     *hub.Metrics
+	Policy      *hub.PolicyEngine
+	Dialer      Dialer
+	Listeners   ListenerRuntime
+	Version     string
+	StartedAt   time.Time
 }
 
 // Server serves /api/v1 and the SSE stream.
@@ -113,6 +117,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/v1/endpoints/{id}", s.requireAuth(s.handleUpdateEndpoint))
 	mux.HandleFunc("DELETE /api/v1/endpoints/{id}", s.requireAuth(s.handleDeleteEndpoint))
 	mux.HandleFunc("POST /api/v1/endpoints/{name}/reconnect", s.requireAuth(s.handleReconnectEndpoint))
+
+	// connect.json as a document: export, import, and the copy-paste helpers.
+	mux.HandleFunc("GET /api/v1/connect", s.requireAuth(s.handleGetConnections))
+	mux.HandleFunc("PUT /api/v1/connect", s.requireAuth(s.handlePutConnections))
+	mux.HandleFunc("GET /api/v1/connect/{kind}/{id}", s.requireAuth(s.handleDirectConnect))
 
 	// API debugger
 	mux.HandleFunc("POST /api/v1/console/invoke", s.requireAuth(s.handleConsoleInvoke))

@@ -200,7 +200,7 @@ export function EndpointsPage() {
                 <td>{item.name}</td>
                 <td>{item.kind === "upstream_dial" ? "上游（QQ）" : "下游（Bot）"}{item.kind === "upstream_dial" && item.mode === "split" ? " · split" : ""}</td>
                 <td class="hub-mono">{item.url}</td>
-                <td>{item.source === "config" ? "config.yaml" : "WebUI"}</td>
+                <td>{item.source === "connect.json" ? "connect.json" : item.source}</td>
                 <td>
                   <span class={"hub-dot hub-dot--" + (item.state === "online" ? "online" : item.state === "backoff" ? "degraded" : "offline")}>
                     {stateLabel(item.state)}
@@ -338,7 +338,9 @@ function EndpointForm(props: {
         <span class="hub-field-label">启用</span>
         <input type="checkbox" checked={form.enabled} onChange={(e) => set({ enabled: (e.target as HTMLInputElement).checked })} />
       </label>
-      <p class="hub-muted">指数退避 + 抖动；连接成功后重新从 min 开始。token 存在本地 SQLite（明文，拨号需要）。</p>
+      <p class="hub-muted">
+        指数退避 + 抖动；连接成功后重新从 min 开始。token 存在 connect.json（本地密钥加密），可在「连接文件」页查看或导出。
+      </p>
       <div class="hub-row hub-row--end">
         <button type="submit">{props.submitLabel}</button>
         <button type="button" onClick={props.onCancel}>

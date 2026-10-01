@@ -32,19 +32,19 @@ func newFakePeer(id string, role onebot.Role) *fakePeer {
 	}
 }
 
-func (f *fakePeer) ID() string               { return f.id }
-func (f *fakePeer) Kind() string             { return f.kind }
-func (f *fakePeer) Role() onebot.Role        { return f.role }
-func (f *fakePeer) SelfID() string           { return f.selfID }
-func (f *fakePeer) RemoteAddr() string       { return f.addr }
-func (f *fakePeer) TokenFingerprint() string { return f.tokenFP }
-func (f *fakePeer) UserAgent() string        { return f.userAgnt }
-func (f *fakePeer) Label() string            { return f.kind + "/" + f.id }
-func (f *fakePeer) Done() <-chan struct{}    { return f.closeCh }
-func (f *fakePeer) Queued() int64            { return 0 }
-func (f *fakePeer) Dropped() int64           { return 0 }
+func (f *fakePeer) ID() string                        { return f.id }
+func (f *fakePeer) Kind() string                      { return f.kind }
+func (f *fakePeer) Role() onebot.Role                 { return f.role }
+func (f *fakePeer) SelfID() string                    { return f.selfID }
+func (f *fakePeer) RemoteAddr() string                { return f.addr }
+func (f *fakePeer) TokenFingerprint() string          { return f.tokenFP }
+func (f *fakePeer) UserAgent() string                 { return f.userAgnt }
+func (f *fakePeer) Label() string                     { return f.kind + "/" + f.id }
+func (f *fakePeer) Done() <-chan struct{}             { return f.closeCh }
+func (f *fakePeer) Queued() int64                     { return 0 }
+func (f *fakePeer) Dropped() int64                    { return 0 }
 func (f *fakePeer) SetReadDeadlineOverride(time.Time) {}
-func (f *fakePeer) WriteLoop()               {}
+func (f *fakePeer) WriteLoop()                        {}
 func (f *fakePeer) ReadMessage() ([]byte, error) {
 	select {
 	case <-f.closeCh:

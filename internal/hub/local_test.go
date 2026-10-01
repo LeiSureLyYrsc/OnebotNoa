@@ -5,45 +5,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
 
-// newLocalTestHub builds a hub with one account, one bot and a binding.
-func newLocalTestHub(t *testing.T) (*Hub, *LocalService, *store.Store, model.Bot, model.Account) {
+// newLocalTestHub builds a hub backed by an in-memory connection store with one
+// account, one Bot and a binding between them.
+//
+// It also keeps a real (empty) audit database: the hub writes audit entries for
+// refused connections and that path must stay exercised.
+func newLocalTestHub(t *testing.T) (*Hub, *LocalService, *testConnStore, Bot, Account) {
 	t.Helper()
-	ctx := context.Background()
 
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "local.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	account, err := st.CreateAccount(ctx, "50001", "测试号", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bot, err := st.CreateBot(ctx, "framework", "hash", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.CreateBinding(ctx, model.Binding{
-		BotID: bot.ID, AccountID: account.ID, IsDefault: true, Enabled: true, Scope: []byte("{}"),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	conns := newTestConnStore()
+	account := conns.addAccount("50001", "测试号")
+	bot := conns.addBot("framework")
+	conns.addBinding(bot.Name, account.SelfID, true, "{}")
 
 	cfg := testConfig(t)
-	relay := New(cfg, st, slog.New(slog.DiscardHandler))
+	relay := New(cfg, nil, conns, slog.New(slog.DiscardHandler))
 	service := NewLocalService(relay, 50*time.Millisecond, slog.New(slog.DiscardHandler))
-	return relay, service, st, bot, account
+	return relay, service, conns, bot, account
 }
 
 func testConfig(t *testing.T) *config.Config {
@@ -51,14 +37,14 @@ func testConfig(t *testing.T) *config.Config {
 	return config.Default()
 }
 
-// dialConn attaches a fake downstream connection that carries a bot's bindings.
-func attachDownstream(t *testing.T, h *Hub, bot model.Bot, accountIDs ...int64) (*DownstreamConn, *fakePeer) {
+// attachDownstream attaches a fake downstream connection carrying a Bot bindings.
+func attachDownstream(t *testing.T, h *Hub, bot Bot, selfIDs ...string) (*DownstreamConn, *fakePeer) {
 	t.Helper()
 	peer := newFakePeer("down-1", onebot.RoleUniversal)
 	conn := newDownstreamConn(peer.ID(), DownstreamInfo{Bot: bot}, peer, h.actions, h, slog.New(slog.DiscardHandler))
 	conn.mu.Lock()
-	for _, id := range accountIDs {
-		conn.bindings[id] = model.Binding{BotID: bot.ID, AccountID: id, Enabled: true, IsDefault: true}
+	for _, selfID := range selfIDs {
+		conn.bindings[selfID] = JBinding{BotName: bot.Name, AccountSelfID: selfID, Enabled: true, IsDefault: true}
 	}
 	conn.mu.Unlock()
 	return conn, peer
@@ -66,7 +52,7 @@ func attachDownstream(t *testing.T, h *Hub, bot model.Bot, accountIDs ...int64) 
 
 func TestLocalServiceAnswersReadOnlyActions(t *testing.T) {
 	relay, service, _, bot, account := newLocalTestHub(t)
-	conn, peer := attachDownstream(t, relay, bot, account.ID)
+	conn, peer := attachDownstream(t, relay, bot, account.SelfID)
 
 	for _, action := range []string{"get_status", "get_version_info", "can_send_image", "hub_list_accounts", "hub_get_account"} {
 		handled := service.HandleAction(context.Background(), conn, account.SelfID, onebot.ActionFrame{
@@ -84,7 +70,7 @@ func TestLocalServiceAnswersReadOnlyActions(t *testing.T) {
 	}
 	for _, frame := range frames {
 		var resp struct {
-			Status string `json:"status"`
+			Status string          `json:"status"`
 			Echo   json.RawMessage `json:"echo"`
 		}
 		if err := json.Unmarshal(frame, &resp); err != nil {
@@ -111,24 +97,23 @@ func TestLocalServiceAnswersReadOnlyActions(t *testing.T) {
 	if status.Data.Online {
 		t.Fatal("no upstream is attached, so online must be false")
 	}
-	if state := status.Data.Accounts["50001"]; state != model.StatusOffline {
+	if state := status.Data.Accounts["50001"]; state != StatusOffline {
 		t.Fatalf("account state = %q, want offline", state)
 	}
 }
 
 // TestLocalServiceRequiresAResolvedAccount pins the contract with the routing
-// layer: the relay never guesses which account a request meant. Ambiguity is
-// resolved by the router (which answers 1404) before this handler is reached.
+// layer: the relay never guesses which account a request meant.
 func TestLocalServiceRequiresAResolvedAccount(t *testing.T) {
 	relay, service, _, bot, account := newLocalTestHub(t)
-	conn, _ := attachDownstream(t, relay, bot, account.ID)
+	conn, _ := attachDownstream(t, relay, bot, account.SelfID)
 
 	if service.HandleAction(context.Background(), conn, "", onebot.ActionFrame{Action: "get_login_info"}, nil) {
 		t.Fatal("an unresolved account must not be answered locally")
 	}
 
 	// With the resolved account the relay answers from the cached identity.
-	single, peer := attachDownstream(t, relay, bot, account.ID)
+	single, peer := attachDownstream(t, relay, bot, account.SelfID)
 	if !service.HandleAction(context.Background(), single, account.SelfID, onebot.ActionFrame{Action: "get_login_info"}, nil) {
 		t.Fatal("a resolved get_login_info should be answered locally")
 	}
@@ -152,7 +137,7 @@ func TestLocalServiceRequiresAResolvedAccount(t *testing.T) {
 
 func TestLocalServiceSynthesisesMetaEvents(t *testing.T) {
 	relay, service, _, bot, account := newLocalTestHub(t)
-	conn, peer := attachDownstream(t, relay, bot, account.ID)
+	conn, peer := attachDownstream(t, relay, bot, account.SelfID)
 
 	service.OnConnect(context.Background(), conn)
 	frames := peer.sentFrames()
@@ -191,14 +176,14 @@ func TestLocalServiceSynthesisesMetaEvents(t *testing.T) {
 	if heartbeat.PostType != "meta_event" || heartbeat.MetaEventType != "heartbeat" {
 		t.Fatalf("unexpected heartbeat: %s", frames[1])
 	}
-	if heartbeat.Status.Online || heartbeat.Status.State != model.StatusOffline {
+	if heartbeat.Status.Online || heartbeat.Status.State != StatusOffline {
 		t.Fatalf("offline account must be reported offline: %s", frames[1])
 	}
 }
 
 func TestLocalServiceHeartbeatTracksAccountState(t *testing.T) {
 	relay, service, _, bot, account := newLocalTestHub(t)
-	conn, peer := attachDownstream(t, relay, bot, account.ID)
+	conn, peer := attachDownstream(t, relay, bot, account.SelfID)
 
 	// Attach a live upstream connection for the account.
 	upstream := newFakePeer("up-1", onebot.RoleUniversal)
@@ -224,7 +209,7 @@ func TestLocalServiceHeartbeatTracksAccountState(t *testing.T) {
 	if err := json.Unmarshal(frames[0], &heartbeat); err != nil {
 		t.Fatal(err)
 	}
-	if !heartbeat.Status.Online || !heartbeat.Status.Good || heartbeat.Status.State != model.StatusOnline {
+	if !heartbeat.Status.Online || !heartbeat.Status.Good || heartbeat.Status.State != StatusOnline {
 		t.Fatalf("an attached universal upstream means online/good: %s", frames[0])
 	}
 }
@@ -236,16 +221,14 @@ func TestLocalServiceStartStopIsIdempotent(t *testing.T) {
 	service.Stop() // must not panic on a double stop
 }
 
-
-// TestInvokeUsesLocalAnswersFirst pins the debugger's semantics: a relay-served
+// TestInvokeUsesLocalAnswersFirst pins the debugger semantics: a relay-served
 // action must be answered by the relay itself, exactly like it is for a Bot.
-// Otherwise the debugger would show a different answer than the Bot gets.
 func TestInvokeUsesLocalAnswersFirst(t *testing.T) {
 	relay, service, _, bot, account := newLocalTestHub(t)
 	relay.Actions().SetLocalHandler(service)
 
-	// Attach a live upstream connection that answers everything with a marker,
-	// so we can tell a local answer from a forwarded one.
+	// Attach a live upstream connection that answers everything with a marker, so
+	// a local answer can be told apart from a forwarded one.
 	upstream := newFakePeer("up-local", onebot.RoleUniversal)
 	upstream.selfID = account.SelfID
 	if _, err := relay.Registry().AttachUpstream(context.Background(), UpstreamInfo{
@@ -253,8 +236,6 @@ func TestInvokeUsesLocalAnswersFirst(t *testing.T) {
 	}, upstream); err != nil {
 		t.Fatalf("attach upstream: %v", err)
 	}
-	frames := [][]byte{}
-	upstream.Send([]byte(`{}`))
 
 	reply, err := relay.Invoke(context.Background(), account.SelfID,
 		[]byte(`{"action":"get_version_info","params":{},"echo":"c1"}`),
@@ -275,10 +256,8 @@ func TestInvokeUsesLocalAnswersFirst(t *testing.T) {
 		t.Fatalf("the relay must answer get_version_info itself, got %s", reply)
 	}
 	_ = bot
-	_ = frames
 
-	// hub_list_accounts must report the bound account, not an empty list: the
-	// console builds its synthetic connection from the real bindings.
+	// hub_list_accounts must report the bound account, not an empty list.
 	listReply, err := relay.Invoke(context.Background(), account.SelfID,
 		[]byte(`{"action":"hub_list_accounts","params":{},"echo":"c3"}`),
 		json.RawMessage(`"c3"`), false)
@@ -302,7 +281,7 @@ func TestInvokeUsesLocalAnswersFirst(t *testing.T) {
 	if listResponse.Data.Accounts[0].SelfID != account.SelfID {
 		t.Fatalf("hub_list_accounts reported %q, want %q", listResponse.Data.Accounts[0].SelfID, account.SelfID)
 	}
-	if listResponse.Data.Accounts[0].State != model.StatusOnline {
+	if listResponse.Data.Accounts[0].State != StatusOnline {
 		t.Fatalf("the attached upstream means online, got %q", listResponse.Data.Accounts[0].State)
 	}
 }
@@ -346,7 +325,6 @@ func TestInvokeForwardsUnknownActions(t *testing.T) {
 				Echo json.RawMessage `json:"echo"`
 			}
 			if err := json.Unmarshal(sent[len(sent)-1], &forwarded); err == nil && len(forwarded.Echo) > 0 {
-				// Answer through the normal dispatch path.
 				reply := fmt.Sprintf(`{"status":"ok","retcode":0,"data":[1,2,3],"echo":%s}`, forwarded.Echo)
 				relay.actions.HandleResponse([]byte(reply))
 				break
@@ -372,3 +350,5 @@ func TestInvokeRejectsUnknownAccount(t *testing.T) {
 		t.Fatal("invoking on an unknown account must fail")
 	}
 }
+
+var _ = model.StatusOffline

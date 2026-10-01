@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 )
 
@@ -97,13 +96,8 @@ func TestHTTPReportRequiresIdentityAndToken(t *testing.T) {
 
 	// A per-instance token may only speak for its own account.
 	account := env.createAccount(t, "91004")
-	plain, hash, err := auth.NewToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := env.store.SetAccountToken(t.Context(), account.ID, &hash); err != nil {
-		t.Fatal(err)
-	}
+	plain := "account-token-91004"
+	env.conns.setAccountToken(account.SelfID, plain)
 	res, _ = env.postJSON(t, "/onebot/v11/report", `{"post_type":"message","self_id":91005}`, map[string]string{
 		"X-Self-ID":     "91005",
 		"Authorization": "Bearer " + plain,

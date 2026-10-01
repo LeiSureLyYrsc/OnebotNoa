@@ -3,57 +3,75 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"strconv"
+	"sort"
+	"strings"
 
+	"github.com/LeiSureLyYrsc/OnebotNoa/internal/connect"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 )
 
 // bindingView is a grant plus the names the table needs.
 type bindingView struct {
-	model.Binding
-	BotName       string `json:"bot_name"`
-	AccountSelfID string `json:"account_self_id"`
-	AccountName   string `json:"account_name"`
+	ID            int64     `json:"id"`
+	BotName       string    `json:"bot_name"`
+	AccountSelfID string    `json:"account_self_id"`
+	AccountName   string    `json:"account_name"`
+	Priority      int       `json:"priority"`
+	IsDefault     bool      `json:"is_default"`
+	Enabled       bool      `json:"enabled"`
+	Scope         hub.Scope `json:"scope"`
+}
+
+func (s *Server) bindingView(binding connect.Binding) bindingView {
+	view := bindingView{
+		ID:            binding.ID,
+		BotName:       binding.BotName,
+		AccountSelfID: binding.AccountSelfID,
+		Priority:      binding.Priority,
+		IsDefault:     binding.IsDefault,
+		Enabled:       binding.Enabled,
+		Scope:         scopeFromDocument(binding.Scope),
+	}
+	if account, ok := s.opt.Connections.AccountBySelfID(binding.AccountSelfID); ok {
+		view.AccountName = account.Name
+	}
+	return view
+}
+
+// scopeFromDocument converts the typed scope back into the JSON shape the
+// routing path parses, so the API and the hub cannot drift apart.
+func scopeFromDocument(scope connect.Scope) hub.Scope {
+	encoded, err := json.Marshal(scope)
+	if err != nil {
+		return hub.Scope{}
+	}
+	parsed, err := hub.ParseScope(encoded)
+	if err != nil {
+		return hub.Scope{}
+	}
+	return parsed
 }
 
 func (s *Server) bindingViews(r *http.Request) ([]bindingView, error) {
-	ctx := r.Context()
-	bindings, err := s.opt.Store.ListBindings(ctx)
-	if err != nil {
-		return nil, err
+	rows := s.opt.Connections.ListBindings()
+	out := make([]bindingView, 0, len(rows))
+	for _, binding := range rows {
+		out = append(out, s.bindingView(binding))
 	}
-	bots, err := s.opt.Store.ListBots(ctx)
-	if err != nil {
-		return nil, err
-	}
-	accounts, err := s.opt.Store.ListAccounts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	botNames := map[int64]string{}
-	for _, b := range bots {
-		botNames[b.ID] = b.Name
-	}
-	accountNames := map[int64]struct{ selfID, name string }{}
-	for _, a := range accounts {
-		accountNames[a.ID] = struct{ selfID, name string }{a.SelfID, a.Name}
-	}
-
-	out := make([]bindingView, 0, len(bindings))
-	for _, b := range bindings {
-		acc := accountNames[b.AccountID]
-		out = append(out, bindingView{
-			Binding:       b,
-			BotName:       botNames[b.BotID],
-			AccountSelfID: acc.selfID,
-			AccountName:   acc.name,
-		})
-	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AccountSelfID != out[j].AccountSelfID {
+			return out[i].AccountSelfID < out[j].AccountSelfID
+		}
+		return out[i].BotName < out[j].BotName
+	})
 	return out, nil
 }
 
 func (s *Server) handleListBindings(w http.ResponseWriter, r *http.Request) {
+	if s.opt.Connections == nil {
+		writeError(w, http.StatusServiceUnavailable, "连接配置文件尚未就绪")
+		return
+	}
 	views, err := s.bindingViews(r)
 	if err != nil {
 		s.fail(w, "读取绑定关系失败", err)
@@ -63,34 +81,86 @@ func (s *Server) handleListBindings(w http.ResponseWriter, r *http.Request) {
 }
 
 type bindingRequest struct {
-	BotID     int64           `json:"bot_id"`
-	AccountID int64           `json:"account_id"`
-	Priority  *int            `json:"priority"`
-	IsDefault *bool           `json:"is_default"`
-	Enabled   *bool           `json:"enabled"`
-	Scope     json.RawMessage `json:"scope"`
+	BotID       int64           `json:"bot_id"`
+	BotName     string          `json:"bot_name"`
+	AccountID   int64           `json:"account_id"`
+	AccountSelf string          `json:"account_self_id"`
+	Priority    *int            `json:"priority"`
+	IsDefault   *bool           `json:"is_default"`
+	Enabled     *bool           `json:"enabled"`
+	Scope       json.RawMessage `json:"scope"`
 }
 
-// validateScope rejects malformed过滤器 so the routing path never has to guess.
-func validateScope(raw json.RawMessage) (json.RawMessage, string) {
+// resolveBindingRefs accepts either the numeric ids the WebUI has always sent or
+// the names the file uses, so old clients keep working after the split.
+func (s *Server) resolveBindingRefs(req bindingRequest) (botName, selfID, problem string) {
+	botName = strings.TrimSpace(req.BotName)
+	if botName == "" && req.BotID > 0 {
+		bot, ok := s.opt.Connections.BotByID(req.BotID)
+		if !ok {
+			return "", "", "bot_id 不存在"
+		}
+		botName = bot.Name
+	}
+	if botName == "" {
+		return "", "", "需要提供 bot_id 或 bot_name"
+	}
+	selfID = strings.TrimSpace(req.AccountSelf)
+	if selfID == "" && req.AccountID > 0 {
+		account, ok := s.opt.Connections.AccountByID(req.AccountID)
+		if !ok {
+			return "", "", "account_id 不存在"
+		}
+		selfID = account.SelfID
+	}
+	if selfID == "" {
+		return "", "", "需要提供 account_id 或 account_self_id"
+	}
+	if _, ok := s.opt.Connections.BotByName(botName); !ok {
+		return "", "", "Bot " + botName + " 不存在"
+	}
+	if _, ok := s.opt.Connections.AccountBySelfID(selfID); !ok {
+		return "", "", "账号 " + selfID + " 不存在"
+	}
+	return botName, selfID, ""
+}
+
+// validateScope rejects a malformed filter so the routing path never guesses.
+func validateScope(raw json.RawMessage) (connect.Scope, string) {
 	if len(raw) == 0 {
-		return json.RawMessage("{}"), ""
+		return connect.Scope{}, ""
 	}
 	if problem := jsonKindProblem(raw, "object"); problem != "" {
-		return nil, "scope " + problem
+		return connect.Scope{}, "scope " + problem
 	}
 	scope, err := hub.ParseScope(raw)
 	if err != nil {
-		return nil, "scope 不是合法的 JSON"
+		return connect.Scope{}, "scope 不是合法的 JSON"
 	}
 	if scope.MetaEvents != "" {
 		switch scope.MetaEvents {
 		case "synthetic", "passthrough", "drop":
 		default:
-			return nil, "scope.meta_events 只能是 synthetic | passthrough | drop"
+			return connect.Scope{}, "scope.meta_events 只能是 synthetic | passthrough | drop"
 		}
 	}
-	return raw, ""
+	return toDocumentScope(scope), ""
+}
+
+func toDocumentScope(scope hub.Scope) connect.Scope {
+	out := connect.Scope{
+		PostTypes:     scope.PostTypes,
+		IncludeGroups: scope.IncludeGroups,
+		ExcludeGroups: scope.ExcludeGroups,
+		IncludeUsers:  scope.IncludeUsers,
+		ExcludeUsers:  scope.ExcludeUsers,
+		MetaEvents:    scope.MetaEvents,
+	}
+	if scope.ExcludeSelf {
+		value := true
+		out.ExcludeSelf = &value
+	}
+	return out
 }
 
 func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
@@ -99,15 +169,9 @@ func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体不是合法的 JSON")
 		return
 	}
-	ctx := r.Context()
-	bot, err := s.opt.Store.BotByID(ctx, req.BotID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bot_id 不存在")
-		return
-	}
-	account, err := s.opt.Store.AccountByID(ctx, req.AccountID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "account_id 不存在")
+	botName, selfID, problem := s.resolveBindingRefs(req)
+	if problem != "" {
+		writeError(w, http.StatusBadRequest, problem)
 		return
 	}
 	scope, problem := validateScope(req.Scope)
@@ -116,20 +180,19 @@ func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	binding := model.Binding{
-		BotID:     bot.ID,
-		AccountID: account.ID,
-		Priority:  100,
-		IsDefault: req.IsDefault != nil && *req.IsDefault,
-		Enabled:   req.Enabled == nil || *req.Enabled,
-		Scope:     scope,
+	binding := connect.Binding{
+		BotName:       botName,
+		AccountSelfID: selfID,
+		Priority:      100,
+		IsDefault:     req.IsDefault != nil && *req.IsDefault,
+		Enabled:       req.Enabled == nil || *req.Enabled,
+		Scope:         scope,
 	}
 	if req.Priority != nil {
 		binding.Priority = *req.Priority
 	}
 
-	created, err := s.opt.Store.CreateBinding(ctx, binding)
-	if err != nil {
+	if _, err := s.opt.Connections.CreateBinding(binding); err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "该 Bot 已绑定此账号")
 			return
@@ -137,17 +200,8 @@ func (s *Server) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "创建绑定失败", err)
 		return
 	}
-	if created.IsDefault {
-		// Promote through UpdateBinding so the previous default is cleared.
-		created.Priority = binding.Priority
-		created.Scope = scope
-		if err := s.opt.Store.UpdateBinding(ctx, created); err != nil {
-			s.fail(w, "设置默认账号失败", err)
-			return
-		}
-	}
-	s.audit(r, s.actor(r), "binding.create", bot.Name+" -> "+account.SelfID, "")
-	s.opt.Hub.RefreshBindings(ctx)
+	s.audit(r, s.actor(r), "binding.create", botName+" -> "+selfID, "")
+	s.opt.Hub.RefreshBindings(r.Context())
 
 	views, _ := s.bindingViews(r)
 	writeJSON(w, http.StatusCreated, map[string]any{"bindings": views})
@@ -158,10 +212,9 @@ func (s *Server) handleUpdateBinding(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx := r.Context()
-	binding, err := s.opt.Store.BindingByID(ctx, id)
-	if err != nil {
-		s.notFoundOrFail(w, "绑定不存在", err)
+	binding, found := s.opt.Connections.BindingByID(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "绑定不存在")
 		return
 	}
 
@@ -188,12 +241,12 @@ func (s *Server) handleUpdateBinding(w http.ResponseWriter, r *http.Request) {
 		binding.Scope = scope
 	}
 
-	if err := s.opt.Store.UpdateBinding(ctx, binding); err != nil {
+	if err := s.opt.Connections.UpdateBinding(binding); err != nil {
 		s.fail(w, "更新绑定失败", err)
 		return
 	}
-	s.audit(r, s.actor(r), "binding.update", bindingKey(binding), "")
-	s.opt.Hub.RefreshBindings(ctx)
+	s.audit(r, s.actor(r), "binding.update", binding.BotName+" -> "+binding.AccountSelfID, "")
+	s.opt.Hub.RefreshBindings(r.Context())
 
 	views, _ := s.bindingViews(r)
 	writeJSON(w, http.StatusOK, map[string]any{"bindings": views})
@@ -204,23 +257,18 @@ func (s *Server) handleDeleteBinding(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx := r.Context()
-	binding, err := s.opt.Store.BindingByID(ctx, id)
-	if err != nil {
-		s.notFoundOrFail(w, "绑定不存在", err)
+	binding, found := s.opt.Connections.BindingByID(id)
+	if !found {
+		writeError(w, http.StatusNotFound, "绑定不存在")
 		return
 	}
-	if err := s.opt.Store.DeleteBinding(ctx, id); err != nil {
+	if err := s.opt.Connections.DeleteBinding(id); err != nil {
 		s.fail(w, "删除绑定失败", err)
 		return
 	}
-	s.audit(r, s.actor(r), "binding.delete", bindingKey(binding), "")
-	s.opt.Hub.RefreshBindings(ctx)
+	s.audit(r, s.actor(r), "binding.delete", binding.BotName+" -> "+binding.AccountSelfID, "")
+	s.opt.Hub.RefreshBindings(r.Context())
 
 	views, _ := s.bindingViews(r)
 	writeJSON(w, http.StatusOK, map[string]any{"bindings": views})
-}
-
-func bindingKey(b model.Binding) string {
-	return "bot:" + strconv.FormatInt(b.BotID, 10) + " account:" + strconv.FormatInt(b.AccountID, 10)
 }

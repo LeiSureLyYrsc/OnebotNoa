@@ -15,7 +15,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
@@ -67,7 +66,8 @@ type upstreamEnv struct {
 	ts      *httptest.Server
 	dp      *DataPlane
 	hub     *hub.Hub
-	store   *store.Store
+	conns   *testConnStore
+	audit   *store.Store
 	cfg     *config.Config
 	obs     *recordingObserver
 	policy  *hub.PolicyEngine
@@ -80,9 +80,14 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	t.Helper()
 	ctx := context.Background()
 
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "relay.db"))
+	// Connections live in connect.json in production; the tests drive the same
+	// interfaces from memory so they stay about the data plane. Audit stays on a
+	// real database, because "a refused connection leaves a trace" is one of the
+	// behaviours these tests assert.
+	conns := newTestConnStore()
+	auditStore, err := store.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("open audit store: %v", err)
 	}
 
 	cfg := config.Default()
@@ -95,7 +100,7 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	}
 
 	logger := slog.New(slog.DiscardHandler)
-	relay := hub.New(cfg, st, logger)
+	relay := hub.New(cfg, auditStore, conns.Hub(), logger)
 	obs := &recordingObserver{}
 	metrics := hub.NewMetrics()
 	events := hub.NewEventLog(128)
@@ -116,7 +121,7 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 	localService.Start()
 	t.Cleanup(localService.Stop)
 
-	dp := NewDataPlane(cfg, st, relay, logger)
+	dp := NewDataPlane(cfg, conns, relay, logger)
 	mux := http.NewServeMux()
 	dp.Register(mux)
 	if cfg.Metrics.Enable {
@@ -129,11 +134,11 @@ func newUpstreamEnv(t *testing.T, mutate func(*config.Config)) *upstreamEnv {
 		cancelEnv()
 		dp.CloseAll("test finished")
 		ts.Close()
-		_ = st.Close()
+		_ = auditStore.Close()
 	})
 
 	return &upstreamEnv{
-		ts: ts, dp: dp, hub: relay, store: st, cfg: cfg, obs: obs,
+		ts: ts, dp: dp, hub: relay, conns: conns, audit: auditStore, cfg: cfg, obs: obs,
 		policy: policy, metrics: metrics, events: events,
 		ctx: envCtx,
 	}
@@ -188,9 +193,9 @@ func expectClosed(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
 
 func universalHeaders(selfID string) map[string]string {
 	return map[string]string{
-		"X-Self-ID":       selfID,
-		"X-Client-Role":   "Universal",
-		"Authorization":   "Bearer " + bootstrapToken,
+		"X-Self-ID":     selfID,
+		"X-Client-Role": "Universal",
+		"Authorization": "Bearer " + bootstrapToken,
 	}
 }
 
@@ -214,16 +219,16 @@ func TestSharedEndpointAcceptsTwoInstances(t *testing.T) {
 		}
 	}
 
-	accounts, err := env.store.ListAccounts(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	accounts := env.conns.accounts
 	if len(accounts) != 2 {
 		t.Fatalf("accounts = %d, want 2", len(accounts))
 	}
+	// The live status is runtime state the relay publishes, not a file write: it
+	// is asked of the registry, which is the single source of truth for it.
 	for _, acc := range accounts {
-		if acc.Status != model.StatusOnline {
-			t.Fatalf("persisted status for %s = %s, want online", acc.SelfID, acc.Status)
+		session, ok := env.hub.Registry().Session(acc.SelfID)
+		if !ok || session.State() != model.StatusOnline {
+			t.Fatalf("account %s is not online", acc.SelfID)
 		}
 	}
 
@@ -323,17 +328,9 @@ func TestTokenMismatchForSameSelfIDIsRejected(t *testing.T) {
 	env := newUpstreamEnv(t, func(cfg *config.Config) { cfg.OneBot.UpstreamWS.UnknownAccountPolicy = "auto" })
 
 	const selfID = "40001"
-	account, err := env.store.CreateAccount(ctx, selfID, "bound", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	plain, hash, err := auth.NewToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := env.store.SetAccountToken(ctx, account.ID, &hash); err != nil {
-		t.Fatal(err)
-	}
+	env.conns.addAccount(selfID)
+	plain := "bound-token-40001"
+	env.conns.setAccountToken(selfID, plain)
 
 	// The bound token connects normally.
 	env.dialOK(t, map[string]string{
@@ -366,7 +363,7 @@ func TestTokenMismatchForSameSelfIDIsRejected(t *testing.T) {
 		t.Fatalf("peers = %d, want 1 (the spoof must not attach)", len(peers))
 	}
 
-	entries, err := env.store.ListAudit(ctx, 20, 0)
+	entries, err := env.audit.ListAudit(ctx, 20, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +386,7 @@ func TestUnknownAccountPolicies(t *testing.T) {
 		if len(env.hub.Registry().Pending()) != 0 {
 			t.Fatal("reject policy must not queue a pending account")
 		}
-		if _, err := env.store.AccountBySelfID(context.Background(), "50001"); err == nil {
+		if _, ok := env.conns.AccountBySelfID("50001"); ok {
 			t.Fatal("reject policy must not create the account")
 		}
 	})
@@ -411,8 +408,8 @@ func TestUnknownAccountPolicies(t *testing.T) {
 		if _, err := env.hub.Registry().ApprovePending(context.Background(), pending.ID); err != nil {
 			t.Fatalf("approve: %v", err)
 		}
-		if _, err := env.store.AccountBySelfID(context.Background(), "50002"); err != nil {
-			t.Fatalf("approval should create the account: %v", err)
+		if _, ok := env.conns.AccountBySelfID("50002"); !ok {
+			t.Fatal("approval should create the account")
 		}
 		env.dialOK(t, universalHeaders("50002"))
 		waitFor(t, "session after approval", 3*time.Second, func() bool {
@@ -425,24 +422,17 @@ func TestUnknownAccountPolicies(t *testing.T) {
 		env := newUpstreamEnv(t, func(cfg *config.Config) { cfg.OneBot.UpstreamWS.UnknownAccountPolicy = "auto" })
 		env.dialOK(t, universalHeaders("50003"))
 		waitFor(t, "auto-created account", 3*time.Second, func() bool {
-			_, err := env.store.AccountBySelfID(context.Background(), "50003")
-			return err == nil
+			_, ok := env.conns.AccountBySelfID("50003")
+			return ok
 		})
 	})
 }
 
 func TestDisabledAccountIsRefused(t *testing.T) {
-	ctx := context.Background()
 	env := newUpstreamEnv(t, nil)
 
-	account, err := env.store.CreateAccount(ctx, "60001", "disabled", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	account.Enabled = false
-	if err := env.store.UpdateAccountProfile(ctx, account); err != nil {
-		t.Fatal(err)
-	}
+	env.conns.addAccount("60001")
+	env.conns.disableAccount("60001")
 
 	conn := env.dialOK(t, universalHeaders("60001"))
 	expectClosed(t, conn, 3*time.Second)
@@ -465,20 +455,11 @@ func TestMissingTokenIsRefusedAtHandshake(t *testing.T) {
 }
 
 func TestPathTokenAndRoleSegments(t *testing.T) {
-	ctx := context.Background()
 	env := newUpstreamEnv(t, func(cfg *config.Config) { cfg.OneBot.UpstreamWS.UnknownAccountPolicy = "auto" })
 
-	account, err := env.store.CreateAccount(ctx, "80001", "pathed", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	plain, hash, err := auth.NewToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := env.store.SetAccountToken(ctx, account.ID, &hash); err != nil {
-		t.Fatal(err)
-	}
+	env.conns.addAccount("80001")
+	plain := "path-token-80001"
+	env.conns.setAccountToken("80001", plain)
 
 	// The path token alone identifies the instance (no X-Self-ID header).
 	conn, resp, err := env.dial(t, "/onebot/v11/ws/"+plain+"/event", nil)

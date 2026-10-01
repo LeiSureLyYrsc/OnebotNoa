@@ -15,7 +15,6 @@ import (
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/store"
 )
 
 // DataPlane serves the OneBot V11 WebSocket endpoints: the shared upstream
@@ -23,7 +22,7 @@ import (
 // (Bot applications dial in).
 type DataPlane struct {
 	cfg    *config.Config
-	store  *store.Store
+	conns  ConnStore
 	hub    *hub.Hub
 	logger *slog.Logger
 
@@ -34,14 +33,15 @@ type DataPlane struct {
 	peers map[string]hub.Peer
 }
 
-// NewDataPlane builds the data plane.
-func NewDataPlane(cfg *config.Config, st *store.Store, h *hub.Hub, logger *slog.Logger) *DataPlane {
+// NewDataPlane builds the data plane. conns is connect.json, which is where
+// the credentials and the connection set live.
+func NewDataPlane(cfg *config.Config, conns ConnStore, h *hub.Hub, logger *slog.Logger) *DataPlane {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &DataPlane{
 		cfg:    cfg,
-		store:  st,
+		conns:  conns,
 		hub:    h,
 		logger: logger,
 		peers:  map[string]hub.Peer{},

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
 
@@ -82,27 +81,22 @@ func (h *Hub) consoleConnection(peer Peer, selfID string) *DownstreamConn {
 		peer:     peer,
 		hub:      h,
 		logger:   h.logger.With("console", peer.ID()),
-		bindings: map[int64]model.Binding{},
+		bindings: map[string]JBinding{},
 	}
 
-	account, err := h.store.AccountBySelfID(context.Background(), selfID)
-	if err != nil {
+	if _, ok := h.conns.AccountBySelfID(selfID); !ok {
 		return conn
 	}
 	// Every Bot that is allowed to use this account is "bound" for the console.
-	bindings, err := h.store.BindingsByAccount(context.Background(), account.ID)
-	if err != nil {
-		return conn
-	}
-	for _, binding := range bindings {
-		conn.bindings[binding.AccountID] = binding
+	for _, binding := range h.conns.BindingsByAccount(selfID) {
+		conn.bindings[binding.BotName] = binding
 		if binding.IsDefault {
-			conn.fixedAccountID = binding.AccountID
+			conn.fixedSelfID = selfID
 		}
 	}
 	if len(conn.bindings) == 0 {
-		conn.bindings[account.ID] = model.Binding{
-			BotID: 0, AccountID: account.ID, Enabled: true, IsDefault: true, Scope: []byte("{}"),
+		conn.bindings[""] = JBinding{
+			BotName: "", AccountSelfID: selfID, Enabled: true, IsDefault: true, Scope: []byte("{}"),
 		}
 	}
 	return conn

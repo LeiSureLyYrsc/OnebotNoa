@@ -6,7 +6,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/auth"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
@@ -34,8 +33,8 @@ func (d *DataPlane) handleDownstreamWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bot, err := d.store.BotByTokenHash(r.Context(), auth.HashToken(token))
-	if err != nil {
+	bot, found := d.conns.BotByToken(token)
+	if !found {
 		d.logger.Warn("downstream connection rejected: unknown token", "addr", remoteAddr, "token_source", tokenSource)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -50,7 +49,7 @@ func (d *DataPlane) handleDownstreamWS(w http.ResponseWriter, r *http.Request) {
 	// the single account that Bot sees on this address.
 	source := "downstream_ws"
 	if binding, dedicated := bindingOf(r.Context()); dedicated {
-		if !d.downstreamListenerAllows(r.Context(), binding, token) {
+		if !d.downstreamListenerAllows(binding, token) {
 			d.logger.Warn("dedicated downstream listener rejected a connection",
 				"listener", binding.Name, "bot", bot.Name, "addr", remoteAddr)
 			http.Error(w, "this listener belongs to another bot", http.StatusForbidden)
@@ -87,7 +86,12 @@ func (d *DataPlane) handleDownstreamWS(w http.ResponseWriter, r *http.Request) {
 	defer d.untrack(peer)
 
 	info := hub.DownstreamInfo{
-		Bot:              bot,
+		// The full Bot travels with the connection: the relay decides about every
+		// action without a second lookup, so its policy must already be here.
+		Bot: hub.Bot{
+			ID: bot.ID, Name: bot.Name, Enabled: bot.Enabled,
+			RateLimit: bot.RateLimit, ActionPolicy: bot.ActionPolicy,
+		},
 		FixedSelfID:      fixedSelfID,
 		RemoteAddr:       remoteAddr,
 		UserAgent:        r.UserAgent(),

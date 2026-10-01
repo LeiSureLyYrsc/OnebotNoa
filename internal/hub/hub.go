@@ -115,6 +115,7 @@ type Dispatcher interface {
 type Hub struct {
 	cfg        *config.Config
 	store      *store.Store
+	conns      ConnStore
 	logger     *slog.Logger
 	registry   *Registry
 	dispatcher Dispatcher
@@ -125,35 +126,52 @@ type Hub struct {
 	mu          sync.Mutex
 	downstreams map[int64]map[string]*DownstreamConn
 
-	// binding cache (account -> bindings) for the per-event path
+	// binding cache (self_id -> bindings) for the per-event path
 	bindingMu     sync.RWMutex
-	bindingCache  map[int64][]model.Binding
+	bindingCache  map[string][]JBinding
 	bindingLoaded time.Time
 
 	onDownstreamConnect    func(context.Context, *DownstreamConn)
 	onDownstreamDisconnect func(context.Context, *DownstreamConn)
 }
 
-// New builds a hub for the given configuration and store.
-func New(cfg *config.Config, st *store.Store, logger *slog.Logger) *Hub {
+// New builds a hub for the given configuration, audit store and connection
+// store.
+//
+// Two stores, on purpose:
+//   - st is the management database. The relay only writes audit entries and
+//     reads Bot policy there, so a damaged database degrades logging instead of
+//     taking the data plane down.
+//   - conns is connect.json: the accounts, Bots, connections and bindings the
+//     relay actually routes by.
+func New(cfg *config.Config, st *store.Store, conns ConnStore, logger *slog.Logger) *Hub {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	reg := newRegistry(st, logger)
+	reg := newRegistry(conns, logger)
 	reg.policy = cfg.OneBot.UpstreamWS.UnknownAccountPolicy
 
 	h := &Hub{
 		cfg:         cfg,
 		store:       st,
+		conns:       conns,
 		logger:      logger,
 		registry:    reg,
 		downstreams: map[int64]map[string]*DownstreamConn{},
 	}
-	h.actions = NewActionRouter(cfg, st, h, logger)
+	if st != nil {
+		reg.SetAuditWriter(func(entry model.AuditEntry) error {
+			return st.AppendAudit(context.Background(), entry)
+		})
+	}
+	h.actions = NewActionRouter(cfg, conns, h, logger)
 	h.router = NewRouter(h, h.actions, logger)
 	h.dispatcher = h.router
 	return h
 }
+
+// ConnStore exposes the connection store (management API, tests).
+func (h *Hub) ConnStore() ConnStore { return h.conns }
 
 // Actions exposes the action router (policy hooks, pending metrics).
 func (h *Hub) Actions() *ActionRouter { return h.actions }
@@ -315,7 +333,7 @@ func (h *Hub) IngestEvent(ctx context.Context, selfID string, raw []byte) error 
 	if !ok {
 		// No WebSocket session: make sure the account exists so the event has an
 		// owner, then route it directly.
-		if _, err := h.store.EnsureAccount(ctx, selfID, "", "http"); err != nil {
+		if _, _, err := h.conns.EnsureAccount(selfID, "http"); err != nil {
 			return fmt.Errorf("hub: %w", err)
 		}
 		h.registry.notifyFrame(selfID, onebot.RoleUniversal, raw)

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/config"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/onebot"
 )
 
@@ -33,7 +32,7 @@ type queuedAction struct {
 
 // PreSendRequest carries everything the decision needs.
 type PreSendRequest struct {
-	Bot    model.Bot
+	Bot    Bot
 	SelfID string
 	// Action is the base action name (the _async/_rate_limited suffixes are
 	// already stripped) so policy matches what the operator wrote down.

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/LeiSureLyYrsc/OnebotNoa/internal/hub"
-	"github.com/LeiSureLyYrsc/OnebotNoa/internal/model"
 )
 
 func TestConsoleInvokeValidation(t *testing.T) {
@@ -46,19 +45,9 @@ func TestConsoleInvokeResolvesSingleBindingAndReplies(t *testing.T) {
 	csrf := loginAdmin(t, a)
 	ctx := context.Background()
 
-	account, err := a.st.CreateAccount(ctx, "61001", "console", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bot, err := a.st.CreateBot(ctx, "console-bot", hashTokenForTest("seed"), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.st.CreateBinding(ctx, model.Binding{
-		BotID: bot.ID, AccountID: account.ID, Enabled: true, IsDefault: true, Scope: []byte("{}"),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	a.seedAccount(t, "61001", "console")
+	bot := a.seedBot(t, "console-bot", "console-bot-token")
+	a.seedBinding(t, bot.Name, "61001", true, "{}")
 
 	// A single binding is enough to resolve the account, but the account is not
 	// connected: a clear 409 rather than a hang.
@@ -123,18 +112,12 @@ func TestConsoleInvokeResolvesSingleBindingAndReplies(t *testing.T) {
 func TestConsoleInvokeAmbiguousAccount(t *testing.T) {
 	a := newTestAPI(t)
 	csrf := loginAdmin(t, a)
-	ctx := context.Background()
 
-	first, _ := a.st.CreateAccount(ctx, "62001", "", "test")
-	second, _ := a.st.CreateAccount(ctx, "62002", "", "test")
-	bot, _ := a.st.CreateBot(ctx, "many-bindings", hashTokenForTest("seed2"), "")
-	for _, account := range []model.Account{first, second} {
-		if _, err := a.st.CreateBinding(ctx, model.Binding{
-			BotID: bot.ID, AccountID: account.ID, Enabled: true, Scope: []byte("{}"),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	a.seedAccount(t, "62001", "")
+	a.seedAccount(t, "62002", "")
+	bot := a.seedBot(t, "many-bindings", "many-bindings-token")
+	a.seedBinding(t, bot.Name, "62001", false, "{}")
+	a.seedBinding(t, bot.Name, "62002", false, "{}")
 
 	res, _ := a.write(t, http.MethodPost, "/api/v1/console/invoke",
 		fmt.Sprintf(`{"bot_id":%d,"action":"get_status"}`, bot.ID), csrf)

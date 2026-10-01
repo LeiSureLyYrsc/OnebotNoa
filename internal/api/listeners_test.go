@@ -24,16 +24,11 @@ func (r *recordingListenerRuntime) Reload(context.Context)            { r.reload
 func TestListenerAPIReloadsRuntime(t *testing.T) {
 	a := newTestAPI(t)
 	csrf := loginAdmin(t, a)
-	ctx := context.Background()
-
-	account, err := a.st.CreateAccount(ctx, "94001", "listener-api", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	account := a.seedAccount(t, "94001", "listener-api")
 
 	// Without a runtime manager the API still works and reports "pending".
 	res, payload := a.write(t, http.MethodPost, "/api/v1/listeners",
-		fmt.Sprintf(`{"name":"api-listener","kind":"upstream_listen","bind_addr":"127.0.0.1:0","path":"/onebot/v11/ws","account_id":%d}`, account.ID), csrf)
+		fmt.Sprintf(`{"name":"api-listener","kind":"upstream_listen","bind_addr":"127.0.0.1:0","path":"/onebot/v11/ws","account_self_id":%q}`, account.SelfID), csrf)
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("create listener = %d (%v)", res.StatusCode, payload)
 	}
