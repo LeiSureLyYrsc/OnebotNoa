@@ -1,0 +1,63 @@
+# OnebotNoa static configuration example.
+#
+# Copy to config.yaml and edit. Static settings only: anything that must change
+# at runtime (accounts, bots, bindings, tokens, dedicated listeners) is managed
+# from the WebUI and persisted in the database / connect.json.
+#
+# Every value can be overridden with ONEBOTNOA_* environment variables.
+
+server:
+  # Management UI + REST + data plane share this address.
+  listen: 127.0.0.1:8080
+  # Leave empty to have a random password generated and printed in the log on
+  # first start.
+  admin_password: ""
+  # Set true only when running behind a reverse proxy you control.
+  trust_proxy: false
+  # tls_cert: /etc/onebotnoa/cert.pem
+  # tls_key: /etc/onebotnoa/key.pem
+
+onebot:
+  # QQ instances dial in here (OneBot reverse WebSocket).
+  upstream:
+    enable: true
+    path: /onebot/v11/ws
+    require_token: true
+    # pending | reject | auto — what to do with an unknown self_id.
+    unknown_account: pending
+  # Bots dial in here (OneBot forward client).
+  downstream:
+    enable: true
+    path: /onebot/v11/bot/ws
+  # OneBot V11 HTTP compatibility layer (upstream report / downstream API).
+  http:
+    enable: true
+    prefix: /onebot/v11/http
+  # Outbound connections the relay dials at startup.
+  dial: []
+  #  - name: qq-10002
+  #    role: upstream
+  #    url: ws://10.0.0.5:6700
+  #    token: secret
+  #    self_id: "10002"
+  #  - name: bot-legacy
+  #    role: downstream
+  #    url: ws://10.0.0.9:8080/onebot/v11/ws
+  #    token: secret
+  #    bot_name: legacy
+
+storage:
+  sqlite: ./data/onebotnoa.db
+  connect_file: ./data/connect.json
+  connect_key: ./data/connect.json.key
+
+policy:
+  action_timeout: 15s
+  offline_action: fail_fast # fail_fast | queue
+  meta_events: synthetic # synthetic | passthrough | drop
+  account_rate: 1
+  account_burst: 5
+
+log:
+  level: info # debug | info | warn | error
+  format: json # json | text

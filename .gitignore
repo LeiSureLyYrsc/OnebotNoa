@@ -1,0 +1,31 @@
+# build outputs
+bin/
+test/bin/
+test/data/
+web/dist/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+
+# node
+node_modules/
+**/node_modules/
+
+# runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# local config / secrets
+config.yaml
+*.local.yaml
+data/connect.json
+data/connect.json.key
+
+# local agent state
+.omo/
+
+# editor / OS
+.idea/
+Thumbs.db
+Desktop.ini
