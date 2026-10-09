@@ -1,0 +1,42 @@
+# OnebotNoa - OneBot V11 relay hub.
+#
+#   docker compose up -d          # prebuilt image from GHCR (default)
+#   docker compose up -d --build  # build from this checkout instead
+#
+# First start generates a random administrator password and prints it:
+#   docker compose logs onebotnoa | grep -i password
+
+services:
+  onebotnoa:
+    image: ghcr.io/leisurelyyrsc/onebotnoa:latest
+    build:
+      context: .
+      args:
+        VERSION: ${ONEBOTNOA_VERSION:-dev}
+    container_name: onebotnoa
+    restart: unless-stopped
+    ports:
+      - "${ONEBOTNOA_BIND:-127.0.0.1}:8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      ONEBOTNOA_LISTEN: 0.0.0.0:8080
+      ONEBOTNOA_SQLITE: /data/onebotnoa.db
+      ONEBOTNOA_CONNECT_FILE: /data/connect.json
+      ONEBOTNOA_CONNECT_KEY: /data/connect.json.key
+      ONEBOTNOA_LOG_LEVEL: info
+      ONEBOTNOA_LOG_FORMAT: json
+      # Set on first start to choose the admin password yourself.
+      # ONEBOTNOA_ADMIN_PASSWORD: "change-me-please"
+      # Enable when running behind a reverse proxy you control.
+      # ONEBOTNOA_TRUST_PROXY: "true"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+    # Uncomment when the hub must reach peers on the host.
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"

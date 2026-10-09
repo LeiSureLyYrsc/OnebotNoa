@@ -1,0 +1,28 @@
+[Unit]
+Description=OnebotNoa OneBot V11 relay hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=onebotnoa
+Group=onebotnoa
+WorkingDirectory=/var/lib/onebotnoa
+ExecStart=/usr/local/bin/onebotnoa serve -config /etc/onebotnoa/config.yaml
+Restart=on-failure
+RestartSec=3
+Environment=ONEBOTNOA_LISTEN=127.0.0.1:8080
+Environment=ONEBOTNOA_SQLITE=/var/lib/onebotnoa/onebotnoa.db
+Environment=ONEBOTNOA_CONNECT_FILE=/var/lib/onebotnoa/connect.json
+Environment=ONEBOTNOA_CONNECT_KEY=/var/lib/onebotnoa/connect.json.key
+Environment=ONEBOTNOA_LOG_FORMAT=json
+
+# sandboxing
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/onebotnoa
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
