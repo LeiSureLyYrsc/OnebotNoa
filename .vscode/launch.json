@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "serve (debug)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/onebotnoa",
+      "args": ["serve", "-config", "${workspaceFolder}/test/config.yaml"],
+      "env": {
+        "ONEBOTNOA_LISTEN": "127.0.0.1:8080",
+        "ONEBOTNOA_SQLITE": "${workspaceFolder}/test/data/onebotnoa.db",
+        "ONEBOTNOA_CONNECT_FILE": "${workspaceFolder}/test/data/connect.json",
+        "ONEBOTNOA_CONNECT_KEY": "${workspaceFolder}/test/data/connect.json.key",
+        "ONEBOTNOA_ADMIN_PASSWORD": "admin",
+        "ONEBOTNOA_LOG_LEVEL": "debug",
+        "ONEBOTNOA_LOG_FORMAT": "text"
+      }
+    }
+  ]
+}

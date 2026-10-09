@@ -1,0 +1,159 @@
+:root {
+  --hub-blue: #235cdc;
+  --hub-blue-2: #3a6ea5;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  font-family: Tahoma, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 11px;
+}
+
+body {
+  background: linear-gradient(180deg, #3a6ea5 0%, #235cdc 100%);
+  color: #000;
+}
+
+.desktop {
+  min-height: 100vh;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+.shell {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.toolbar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 6px;
+  background: #ece9d8;
+  border-bottom: 1px solid #aca899;
+}
+
+.toolbar button[aria-pressed="true"] {
+  border-style: inset;
+  background: #d4d0c8;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #808080;
+  padding: 8px;
+}
+
+.sunken {
+  border: 1px solid;
+  border-color: #808080 #fff #fff #808080;
+  background: #fff;
+  max-height: 420px;
+  overflow: auto;
+}
+
+table.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+table.grid th,
+table.grid td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid #e0e0e0;
+  white-space: nowrap;
+}
+
+table.grid th {
+  background: #ece9d8;
+  position: sticky;
+  top: 0;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.dot.online {
+  background: #14a814;
+}
+.dot.degraded {
+  background: #e0a000;
+}
+.dot.offline {
+  background: #a0a0a0;
+}
+
+.row-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.muted {
+  color: #666;
+}
+
+.feed {
+  height: 360px;
+  overflow: auto;
+  background: #000;
+  color: #c8facc;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  padding: 4px;
+}
+
+.feed .t {
+  color: #888;
+}
+.feed .up {
+  color: #7fd3ff;
+}
+.feed .down {
+  color: #ffd479;
+}
+.feed .system {
+  color: #b7b7ff;
+}
+
+.field-row {
+  margin-bottom: 6px;
+}
+
+.stack > * + * {
+  margin-top: 8px;
+}
+
+.status-bar {
+  display: flex;
+  gap: 4px;
+}
+
+.login-wrap {
+  max-width: 360px;
+  margin: 12vh auto 0;
+}
+
+pre.raw {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  background: #f6f6f6;
+  border: 1px solid #ccc;
+  padding: 6px;
+  font-family: Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
